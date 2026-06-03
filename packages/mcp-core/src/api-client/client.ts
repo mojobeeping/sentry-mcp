@@ -5,6 +5,9 @@ import {
   createANewProject as sdkCreateANewProject,
   createANewTeam as sdkCreateANewTeam,
   listAProject_sClientKeys as sdkListAProjectSClientKeys,
+  listAProject_sIssues as sdkListAProjectSIssues,
+  listAProject_sReleases as sdkListAProjectSReleases,
+  listAnEvent_sAttachments as sdkListAnEventSAttachments,
   listAnIssue_sEvents as sdkListAnIssueSEvents,
   listAnOrganization_sIssues as sdkListAnOrganizationSIssues,
   listAnOrganization_sProjects as sdkListAnOrganizationSProjects,
@@ -12,17 +15,23 @@ import {
   listAnOrganization_sReplays as sdkListAnOrganizationSReplays,
   listAnOrganization_sTeams as sdkListAnOrganizationSTeams,
   listRecordingSegments as sdkListRecordingSegments,
+  listTraceItemAttributes as sdkListTraceItemAttributes,
   listYourOrganizations as sdkListYourOrganizations,
   queryExploreEventsInTableFormat as sdkQueryExploreEvents,
   retrieveACountOfReplaysForAGivenIssueOrTransaction as sdkRetrieveACountOfReplays,
+  retrieveAFlamegraphForAnOrganization as sdkRetrieveAFlamegraph,
+  retrieveAProfile as sdkRetrieveAProfile,
   retrieveAProject as sdkRetrieveAProject,
   retrieveAReplayInstance as sdkRetrieveAReplayInstance,
+  retrieveATrace as sdkRetrieveATrace,
   retrieveAnIssue as sdkRetrieveAnIssue,
   retrieveAnIssueEvent as sdkRetrieveAnIssueEvent,
   retrieveAnOrganization as sdkRetrieveAnOrganization,
   retrieveCustomIntegrationIssueLinksForTheGivenSentryIssue as sdkRetrieveCustomIntegrationIssueLinks,
+  retrieveProfileChunksForAnOrganization as sdkRetrieveProfileChunks,
   retrieveSeerIssueFixState as sdkRetrieveSeerIssueFixState,
   retrieveTagDetails as sdkRetrieveTagDetails,
+  retrieveTraceMetadata as sdkRetrieveTraceMetadata,
   startSeerIssueFix as sdkStartSeerIssueFix,
   updateAProject as sdkUpdateAProject,
   updateAnIssue as sdkUpdateAnIssue,
@@ -1557,18 +1566,16 @@ export class SentryApiService {
     opts?: RequestOptions,
   ): Promise<ReleaseList> {
     if (projectSlug) {
-      // Project-level releases endpoint not in SDK, use raw request
-      const searchQuery = new URLSearchParams();
-      if (query) {
-        searchQuery.set("query", query);
-      }
-      const path = `/projects/${organizationSlug}/${projectSlug}/releases/`;
-      const body = await this.requestJSON(
-        searchQuery.toString() ? `${path}?${searchQuery.toString()}` : path,
-        undefined,
-        opts,
-      );
-      return ReleaseListSchema.parse(body);
+      const result = await sdkListAProjectSReleases({
+        ...this.getSdkConfig(opts),
+        path: {
+          organization_id_or_slug: organizationSlug,
+          project_id_or_slug: projectSlug,
+        },
+        query: { query },
+      });
+      const data = this.unwrapSdkResult(result, "listReleases(project)");
+      return ReleaseListSchema.parse(data);
     }
 
     const result = await sdkListAnOrganizationSReleases({
@@ -1747,39 +1754,54 @@ export class SentryApiService {
     },
     opts?: RequestOptions,
   ): Promise<Array<{ key: string; name: string; type: "string" | "number" }>> {
-    // Fetch both string and number attributes
-    const [stringAttributes, numberAttributes] = await Promise.all([
-      this.fetchTraceItemAttributesByType(
-        organizationSlug,
-        itemType,
-        "string",
-        project,
-        statsPeriod,
-        start,
-        end,
-        opts,
-      ),
-      this.fetchTraceItemAttributesByType(
-        organizationSlug,
-        itemType,
-        "number",
-        project,
-        statsPeriod,
-        start,
-        end,
-        opts,
-      ),
+    const timeParams: Record<string, string> = {};
+    if (statsPeriod) {
+      timeParams.statsPeriod = statsPeriod;
+    } else if (start && end) {
+      timeParams.start = start;
+      timeParams.end = end;
+    }
+
+    // Fetch both string and number attributes in parallel via SDK
+    const [stringResult, numberResult] = await Promise.all([
+      sdkListTraceItemAttributes({
+        ...this.getSdkConfig(opts),
+        path: { organization_id_or_slug: organizationSlug },
+        query: {
+          itemType,
+          attributeType: ["string"],
+          ...timeParams,
+          ...(project ? { project: Number(project) } : {}),
+        } as Record<string, unknown>,
+      } as Parameters<typeof sdkListTraceItemAttributes>[0]),
+      sdkListTraceItemAttributes({
+        ...this.getSdkConfig(opts),
+        path: { organization_id_or_slug: organizationSlug },
+        query: {
+          itemType,
+          attributeType: ["number"],
+          ...timeParams,
+          ...(project ? { project: Number(project) } : {}),
+        } as Record<string, unknown>,
+      } as Parameters<typeof sdkListTraceItemAttributes>[0]),
     ]);
 
-    // Combine attributes with explicit type information
+    const stringAttributes = this.unwrapSdkResult<
+      Array<{ key: string; name?: string }>
+    >(stringResult, "listTraceItemAttributes(string)");
+    const numberAttributes = this.unwrapSdkResult<
+      Array<{ key: string; name?: string }>
+    >(numberResult, "listTraceItemAttributes(number)");
+
     const allAttributes: Array<{
       key: string;
       name: string;
       type: "string" | "number";
     }> = [];
 
-    // Add string attributes
-    for (const attr of stringAttributes) {
+    for (const attr of Array.isArray(stringAttributes)
+      ? stringAttributes
+      : []) {
       allAttributes.push({
         key: attr.key,
         name: attr.name || attr.key,
@@ -1787,8 +1809,9 @@ export class SentryApiService {
       });
     }
 
-    // Add number attributes
-    for (const attr of numberAttributes) {
+    for (const attr of Array.isArray(numberAttributes)
+      ? numberAttributes
+      : []) {
       allAttributes.push({
         key: attr.key,
         name: attr.name || attr.key,
@@ -1797,30 +1820,6 @@ export class SentryApiService {
     }
 
     return allAttributes;
-  }
-
-  private async fetchTraceItemAttributesByType(
-    organizationSlug: string,
-    itemType: "spans" | "logs" | "tracemetrics",
-    attributeType: "string" | "number",
-    project?: string,
-    statsPeriod?: string,
-    start?: string,
-    end?: string,
-    opts?: RequestOptions,
-  ): Promise<any> {
-    const queryParams = new URLSearchParams();
-    queryParams.set("itemType", itemType);
-    queryParams.set("attributeType", attributeType);
-    if (project) {
-      queryParams.set("project", project);
-    }
-    this.applyTimeParams(queryParams, statsPeriod, start, end);
-
-    const url = `/organizations/${organizationSlug}/trace-items/attributes/?${queryParams.toString()}`;
-
-    const body = await this.requestJSON(url, undefined, opts);
-    return Array.isArray(body) ? body : [];
   }
 
   /**
@@ -1877,16 +1876,24 @@ export class SentryApiService {
     }
 
     if (projectSlug) {
-      // Project-level issues endpoint not in SDK, use raw request
-      const queryParams = new URLSearchParams();
-      queryParams.set("per_page", String(limit));
-      if (sortBy) queryParams.set("sort", sortBy);
-      queryParams.set("statsPeriod", "24h");
-      queryParams.set("query", sentryQuery.join(" "));
-      queryParams.append("collapse", "unhandled");
-      const apiUrl = `/projects/${organizationSlug}/${projectSlug}/issues/?${queryParams.toString()}`;
-      const body = await this.requestJSON(apiUrl, undefined, opts);
-      return IssueListSchema.parse(body);
+      // The SDK type doesn't include per_page, sort, or collapse query params,
+      // so we pass them via cast.
+      const result = await sdkListAProjectSIssues({
+        ...this.getSdkConfig(opts),
+        path: {
+          organization_id_or_slug: organizationSlug,
+          project_id_or_slug: projectSlug,
+        },
+        query: {
+          per_page: limit,
+          sort: sortBy,
+          statsPeriod: "24h",
+          query: sentryQuery.join(" "),
+          collapse: ["unhandled"],
+        } as Record<string, unknown>,
+      } as Parameters<typeof sdkListAProjectSIssues>[0]);
+      const data = this.unwrapSdkResult(result, "listIssues(project)");
+      return IssueListSchema.parse(data);
     }
 
     const result = await sdkListAnOrganizationSIssues({
@@ -1918,7 +1925,7 @@ export class SentryApiService {
       ...this.getSdkConfig(opts),
       path: {
         organization_id_or_slug: organizationSlug,
-        issue_id: issueId,
+        issue_id: issueId as unknown as number,
       },
     });
     const data = this.unwrapSdkResult(result, "getIssue");
@@ -2186,12 +2193,16 @@ export class SentryApiService {
     },
     opts?: RequestOptions,
   ): Promise<EventAttachmentList> {
-    const body = await this.requestJSON(
-      `/projects/${organizationSlug}/${projectSlug}/events/${eventId}/attachments/`,
-      undefined,
-      opts,
-    );
-    return EventAttachmentListSchema.parse(body);
+    const result = await sdkListAnEventSAttachments({
+      ...this.getSdkConfig(opts),
+      path: {
+        organization_id_or_slug: organizationSlug,
+        project_id_or_slug: projectSlug,
+        event_id: eventId,
+      },
+    });
+    const data = this.unwrapSdkResult(result, "listEventAttachments");
+    return EventAttachmentListSchema.parse(data);
   }
 
   async getEventAttachment(
@@ -2213,14 +2224,12 @@ export class SentryApiService {
     filename: string;
     blob: Blob;
   }> {
-    // Get the attachment metadata first
-    const attachmentsData = await this.requestJSON(
-      `/projects/${organizationSlug}/${projectSlug}/events/${eventId}/attachments/`,
-      undefined,
+    // Get the attachment metadata via SDK
+    const attachments = await this.listEventAttachments(
+      { organizationSlug, projectSlug, eventId },
       opts,
     );
 
-    const attachments = EventAttachmentListSchema.parse(attachmentsData);
     const attachment = attachments.find((att) => att.id === attachmentId);
 
     if (!attachment) {
@@ -2229,7 +2238,8 @@ export class SentryApiService {
       );
     }
 
-    // Download the actual file content
+    // Download the actual file content — SDK doesn't support binary blob
+    // responses, so we keep using raw request() for the download.
     const downloadUrl = `/projects/${organizationSlug}/${projectSlug}/events/${eventId}/attachments/${attachmentId}/?download=1`;
     const downloadResponse = await this.request(
       downloadUrl,
@@ -2376,7 +2386,7 @@ export class SentryApiService {
       ...this.getSdkConfig(opts),
       path: {
         organization_id_or_slug: organizationSlug,
-        issue_id: issueId,
+        issue_id: issueId as unknown as number,
       },
       body: updateData as Parameters<typeof sdkUpdateAnIssue>[0]["body"],
     });
@@ -2755,7 +2765,7 @@ export class SentryApiService {
       body: {
         event_id: eventId,
         instruction,
-      },
+      } as Parameters<typeof sdkStartSeerIssueFix>[0]["body"],
     });
     const data = this.unwrapSdkResult(result, "startAutofix");
     return AutofixRunSchema.parse(data);
@@ -2817,15 +2827,16 @@ export class SentryApiService {
     },
     opts?: RequestOptions,
   ): Promise<TraceMeta> {
-    const queryParams = new URLSearchParams();
-    queryParams.set("statsPeriod", statsPeriod);
-
-    const body = await this.requestJSON(
-      `/organizations/${organizationSlug}/trace-meta/${traceId}/?${queryParams.toString()}`,
-      undefined,
-      opts,
-    );
-    return TraceMetaSchema.parse(body);
+    const result = await sdkRetrieveTraceMetadata({
+      ...this.getSdkConfig(opts),
+      path: {
+        organization_id_or_slug: organizationSlug,
+        trace_id: traceId,
+      },
+      query: { statsPeriod },
+    });
+    const data = this.unwrapSdkResult(result, "getTraceMeta");
+    return TraceMetaSchema.parse(data);
   }
 
   /**
@@ -2869,19 +2880,22 @@ export class SentryApiService {
     },
     opts?: RequestOptions,
   ): Promise<Trace> {
-    const queryParams = new URLSearchParams();
-    // Keep sending the endpoint's declared query parameters even though the
-    // current server implementation ignores `project` and paginates internally.
-    queryParams.set("limit", String(limit));
-    queryParams.set("project", project);
-    queryParams.set("statsPeriod", statsPeriod);
-
-    const body = await this.requestJSON(
-      `/organizations/${organizationSlug}/trace/${traceId}/?${queryParams.toString()}`,
-      undefined,
-      opts,
-    );
-    return TraceSchema.parse(body);
+    // The SDK type doesn't include limit/project query params, but the API
+    // accepts them — pass via cast, matching the pattern used elsewhere.
+    const result = await sdkRetrieveATrace({
+      ...this.getSdkConfig(opts),
+      path: {
+        organization_id_or_slug: organizationSlug,
+        trace_id: traceId,
+      },
+      query: {
+        statsPeriod,
+        limit: String(limit),
+        project,
+      } as Record<string, unknown>,
+    } as Parameters<typeof sdkRetrieveATrace>[0]);
+    const data = this.unwrapSdkResult(result, "getTrace");
+    return TraceSchema.parse(data);
   }
 
   /**
@@ -2928,21 +2942,22 @@ export class SentryApiService {
     },
     opts?: RequestOptions,
   ): Promise<Flamegraph> {
-    const queryParams = new URLSearchParams();
-    queryParams.set("project", projectId.toString());
     // Escape backslashes first, then quotes for proper string escaping
     const escapedTransaction = transactionName
       .replace(/\\/g, "\\\\")
       .replace(/"/g, '\\"');
-    queryParams.set(
-      "query",
-      `event.type:transaction transaction:"${escapedTransaction}"`,
-    );
-    queryParams.set("statsPeriod", statsPeriod);
 
-    const path = `/organizations/${organizationSlug}/profiling/flamegraph/?${queryParams.toString()}`;
-    const body = await this.requestJSON(path, undefined, opts);
-    return FlamegraphSchema.parse(body);
+    const result = await sdkRetrieveAFlamegraph({
+      ...this.getSdkConfig(opts),
+      path: { organization_id_or_slug: organizationSlug },
+      query: {
+        project: [Number(projectId)],
+        query: `event.type:transaction transaction:"${escapedTransaction}"`,
+        statsPeriod,
+      },
+    });
+    const data = this.unwrapSdkResult(result, "getFlamegraph");
+    return FlamegraphSchema.parse(data);
   }
 
   async getTransactionProfile(
@@ -2957,9 +2972,16 @@ export class SentryApiService {
     },
     opts?: RequestOptions,
   ): Promise<TransactionProfile> {
-    const path = `/projects/${organizationSlug}/${projectSlugOrId}/profiling/profiles/${profileId}/`;
-    const body = await this.requestJSON(path, undefined, opts);
-    return TransactionProfileSchema.parse(body);
+    const result = await sdkRetrieveAProfile({
+      ...this.getSdkConfig(opts),
+      path: {
+        organization_id_or_slug: organizationSlug,
+        project_id_or_slug: String(projectSlugOrId),
+        profile_id: profileId,
+      },
+    });
+    const data = this.unwrapSdkResult(result, "getTransactionProfile");
+    return TransactionProfileSchema.parse(data);
   }
 
   /**
@@ -3013,14 +3035,17 @@ export class SentryApiService {
     },
     opts?: RequestOptions,
   ): Promise<ProfileChunk> {
-    const queryParams = new URLSearchParams();
-    queryParams.set("profiler_id", profilerId);
-    queryParams.set("project", projectId.toString());
-    queryParams.set("start", start);
-    queryParams.set("end", end);
-
-    const path = `/organizations/${organizationSlug}/profiling/chunks/?${queryParams.toString()}`;
-    const body = await this.requestJSON(path, undefined, opts);
+    const result = await sdkRetrieveProfileChunks({
+      ...this.getSdkConfig(opts),
+      path: { organization_id_or_slug: organizationSlug },
+      query: {
+        profiler_id: profilerId,
+        project: Number(projectId),
+        start,
+        end,
+      },
+    });
+    const body = this.unwrapSdkResult(result, "getProfileChunk");
 
     // Response wraps chunks in {chunks: []}
     const response = ProfileChunkResponseSchema.parse(body);

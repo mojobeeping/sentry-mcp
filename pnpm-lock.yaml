@@ -403,8 +403,8 @@ importers:
         specifier: ^1.26.0
         version: 1.26.0(@cfworker/json-schema@4.1.1)(zod@3.25.76)
       '@sentry/api':
-        specifier: ^0.141.0
-        version: 0.141.0(zod@3.25.76)
+        specifier: ^0.171.0
+        version: 0.171.0(zod@3.25.76)
       '@sentry/core':
         specifier: 'catalog:'
         version: 10.35.0
@@ -2196,8 +2196,8 @@ packages:
     resolution: {integrity: sha512-9hGP3lD+7o/4ovGTdwv3T9K2t9LxSlR/CAcRQeFApW2c0AGsjTdcglOxsgxYei4YmaISx0CBJ/YqJfQVYxaxWw==}
     engines: {node: '>=18'}
 
-  '@sentry/api@0.141.0':
-    resolution: {integrity: sha512-6DAEAhHnE/bkiUsCIGY4V9fPWVg2sc0Wn0ualQ4xEEurKQgtbafhJyZuuwCfTwT/nYldHosjGfLoWFNdXj9tWA==}
+  '@sentry/api@0.171.0':
+    resolution: {integrity: sha512-CGDw1VfWzmQM6oszfbZiV1tZ/rGj5GcjxhYBDlXH8UhMqz2EtJ+8vlXob2AVkMy/xGQLfAA6M0Ge9cUGpTtuZg==}
     engines: {node: '>=22'}
     peerDependencies:
       zod: ^3.24.0
@@ -2551,6 +2551,7 @@ packages:
 
   '@ungap/structured-clone@1.3.0':
     resolution: {integrity: sha512-WmoN8qaIAo7WTYWbAZuG8PYEhn5fkz7dZrqTBZ7dtt//lL2Gwms1IcnQ5yHqjDfX8Ft5j4YzDM23f87zBfDe9g==}
+    deprecated: Potential CWE-502 - Update to 1.3.1 or higher
 
   '@vercel/oidc@3.1.0':
     resolution: {integrity: sha512-Fw28YZpRnA3cAHHDlkt7xQHiJ0fcL+NRcIqsocZQUSmbzeIKRpwttJjik5ZGanXP+vlA4SbTg+AbA3bP363l+w==}
@@ -6545,7 +6546,7 @@ snapshots:
       '@sentry-internal/browser-utils': 10.35.0
       '@sentry/core': 10.35.0
 
-  '@sentry/api@0.141.0(zod@3.25.76)':
+  '@sentry/api@0.171.0(zod@3.25.76)':
     optionalDependencies:
       zod: 3.25.76
 
