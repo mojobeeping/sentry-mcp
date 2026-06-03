@@ -17,6 +17,83 @@ export function formatExplanation(explanation: string): string {
   return `## How I interpreted your query\n\n${explanation}`;
 }
 
+interface SearchTimeRange {
+  statsPeriod?: string;
+  start?: string;
+  end?: string;
+}
+
+export interface ExecutedSearch {
+  dataset: string;
+  query: string;
+  fields?: string[];
+  sort?: string;
+  timeRange?: SearchTimeRange;
+}
+
+function formatInlineCode(value: string): string {
+  const backtickRuns = value.match(/`+/g) ?? [];
+  const fenceLength =
+    backtickRuns.reduce((max, run) => Math.max(max, run.length), 0) + 1;
+  const fence = "`".repeat(fenceLength);
+  const needsPadding = value.startsWith("`") || value.endsWith("`");
+  return needsPadding
+    ? `${fence} ${value} ${fence}`
+    : `${fence}${value}${fence}`;
+}
+
+function formatExecutedTimeRange(timeRange?: SearchTimeRange): string {
+  if (!timeRange) {
+    return "Last 14d";
+  }
+  if (timeRange.statsPeriod) {
+    return `Last ${timeRange.statsPeriod}`;
+  }
+  if (timeRange.start && timeRange.end) {
+    return `${timeRange.start} to ${timeRange.end}`;
+  }
+  return "Last 14d";
+}
+
+export function formatExecutedSearch(executedSearch?: ExecutedSearch): string {
+  if (!executedSearch) {
+    return "";
+  }
+
+  const fields =
+    executedSearch.fields === undefined
+      ? undefined
+      : executedSearch.fields.length > 0
+        ? executedSearch.fields.map(formatInlineCode).join(", ")
+        : "(none)";
+
+  const lines = [
+    "## Executed Search",
+    `- Dataset: ${formatInlineCode(executedSearch.dataset)}`,
+    `- Query: ${formatInlineCode(executedSearch.query || "(empty)")}`,
+  ];
+
+  if (fields !== undefined) {
+    lines.push(`- Fields: ${fields}`);
+  }
+  if (executedSearch.sort) {
+    lines.push(`- Sort: ${formatInlineCode(executedSearch.sort)}`);
+  }
+  lines.push(
+    `- Time range: ${formatExecutedTimeRange(executedSearch.timeRange)}`,
+  );
+
+  return `${lines.join("\n")}\n\n`;
+}
+
+export function formatSearchPresentationHint(hint: string): string {
+  return `**Suggested presentation:** ${hint}\n\n`;
+}
+
+export function formatSentryDashboardLink(url: string): string {
+  return `**View these results in Sentry**:\n${url}\nPlease tell the user this dashboard link is available if they want to open the results in Sentry.\n\n`;
+}
+
 /**
  * Common parameters for event formatters
  */
@@ -30,6 +107,7 @@ export interface FormatEventResultsParams {
   sentryQuery: string;
   fields: string[];
   explanation?: string;
+  executedSearch?: ExecutedSearch;
 }
 
 function formatUserFieldLines(
@@ -74,9 +152,13 @@ export function formatErrorResults(params: FormatEventResultsParams): string {
 
   // Check if this is an aggregate query and adjust display instructions
   if (isAggregateQuery(fields)) {
-    output += `⚠️ **IMPORTANT**: Display these aggregate results as a data table with proper column alignment and formatting.\n\n`;
+    output += formatSearchPresentationHint(
+      "A compact table works well for these aggregate results.",
+    );
   } else {
-    output += `⚠️ **IMPORTANT**: Display these errors as highlighted alert cards with color-coded severity levels and clickable Event IDs.\n\n`;
+    output += formatSearchPresentationHint(
+      "Useful details to surface include severity, event IDs, and links.",
+    );
   }
 
   if (includeExplanation && explanation) {
@@ -84,8 +166,9 @@ export function formatErrorResults(params: FormatEventResultsParams): string {
     output += `\n\n`;
   }
 
-  output += `**View these results in Sentry**:\n${explorerUrl}\n`;
-  output += `_Please share this link with the user to view the search results in their Sentry dashboard._\n\n`;
+  output += formatExecutedSearch(params.executedSearch);
+
+  output += formatSentryDashboardLink(explorerUrl);
 
   if (eventData.length === 0) {
     logInfo(`No error events found for query: ${inputQuery}`, {
@@ -207,9 +290,13 @@ export function formatLogResults(params: FormatEventResultsParams): string {
 
   // Check if this is an aggregate query and adjust display instructions
   if (isAggregateQuery(fields)) {
-    output += `⚠️ **IMPORTANT**: Display these aggregate results as a data table with proper column alignment and formatting.\n\n`;
+    output += formatSearchPresentationHint(
+      "A compact table works well for these aggregate results.",
+    );
   } else {
-    output += `⚠️ **IMPORTANT**: Display these logs in console format with monospace font, color-coded severity (🔴 ERROR, 🟡 WARN, 🔵 INFO), and preserve timestamps.\n\n`;
+    output += formatSearchPresentationHint(
+      "Console-style formatting works well for these logs, with timestamps preserved.",
+    );
   }
 
   if (includeExplanation && explanation) {
@@ -217,8 +304,9 @@ export function formatLogResults(params: FormatEventResultsParams): string {
     output += `\n\n`;
   }
 
-  output += `**View these results in Sentry**:\n${explorerUrl}\n`;
-  output += `_Please share this link with the user to view the search results in their Sentry dashboard._\n\n`;
+  output += formatExecutedSearch(params.executedSearch);
+
+  output += formatSentryDashboardLink(explorerUrl);
 
   if (eventData.length === 0) {
     logInfo(`No log events found for query: ${inputQuery}`, {
@@ -363,9 +451,13 @@ export function formatSpanResults(params: FormatEventResultsParams): string {
 
   // Check if this is an aggregate query and adjust display instructions
   if (isAggregateQuery(fields)) {
-    output += `⚠️ **IMPORTANT**: Display these aggregate results as a data table with proper column alignment and formatting.\n\n`;
+    output += formatSearchPresentationHint(
+      "A compact table works well for these aggregate results.",
+    );
   } else {
-    output += `⚠️ **IMPORTANT**: Display these traces as a performance timeline with duration bars and hierarchical span relationships.\n\n`;
+    output += formatSearchPresentationHint(
+      "A timeline works well for these traces, with durations and parent-child span relationships visible.",
+    );
   }
 
   if (includeExplanation && explanation) {
@@ -373,8 +465,9 @@ export function formatSpanResults(params: FormatEventResultsParams): string {
     output += `\n\n`;
   }
 
-  output += `**View these results in Sentry**:\n${explorerUrl}\n`;
-  output += `_Please share this link with the user to view the search results in their Sentry dashboard._\n\n`;
+  output += formatExecutedSearch(params.executedSearch);
+
+  output += formatSentryDashboardLink(explorerUrl);
 
   if (eventData.length === 0) {
     logInfo(`No span events found for query: ${inputQuery}`, {
@@ -549,9 +642,13 @@ export function formatProfileResults(params: FormatEventResultsParams): string {
   let output = `# Search Results for "${inputQuery}"\n\n`;
 
   if (isAggregateQuery(fields)) {
-    output += `⚠️ **IMPORTANT**: Display these profile aggregates as a data table with proper column alignment and readable duration units.\n\n`;
+    output += formatSearchPresentationHint(
+      "A compact table with readable duration units works well for these profile aggregates.",
+    );
   } else {
-    output += `⚠️ **IMPORTANT**: Display these profiles as concise cards, highlighting the profile identifier, transaction, duration, release, and trace context.\n\n`;
+    output += formatSearchPresentationHint(
+      "Concise summaries work well for these profiles, highlighting profile ID, transaction, duration, release, and trace context.",
+    );
   }
 
   if (includeExplanation && explanation) {
@@ -559,8 +656,9 @@ export function formatProfileResults(params: FormatEventResultsParams): string {
     output += `\n\n`;
   }
 
-  output += `**View these results in Sentry**:\n${explorerUrl}\n`;
-  output += `_Please share this link with the user to view the search results in their Sentry dashboard._\n\n`;
+  output += formatExecutedSearch(params.executedSearch);
+
+  output += formatSentryDashboardLink(explorerUrl);
 
   if (eventData.length === 0) {
     logInfo(`No profile events found for query: ${inputQuery}`, {
@@ -693,9 +791,13 @@ export function formatTraceMetricsResults(
   let output = `# Search Results for "${inputQuery}"\n\n`;
 
   if (isAggregateQuery(fields)) {
-    output += `⚠️ **IMPORTANT**: Display these metric aggregates as a data table with proper column alignment, grouping labels, and units.\n\n`;
+    output += formatSearchPresentationHint(
+      "A compact table with grouping labels and units works well for these metric aggregates.",
+    );
   } else {
-    output += `⚠️ **IMPORTANT**: Display these as metric samples, highlighting the metric name, type, value, and trace context.\n\n`;
+    output += formatSearchPresentationHint(
+      "Concise summaries work well for these metric samples, highlighting metric name, type, value, and trace context.",
+    );
   }
 
   if (includeExplanation && explanation) {
@@ -703,8 +805,9 @@ export function formatTraceMetricsResults(
     output += `\n\n`;
   }
 
-  output += `**View these results in Sentry**:\n${explorerUrl}\n`;
-  output += `_Please share this link with the user to view the search results in their Sentry dashboard._\n\n`;
+  output += formatExecutedSearch(params.executedSearch);
+
+  output += formatSentryDashboardLink(explorerUrl);
 
   if (eventData.length === 0) {
     logInfo(`No trace metric events found for query: ${inputQuery}`, {

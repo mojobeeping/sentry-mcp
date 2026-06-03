@@ -62,6 +62,36 @@ describe("getIssueUrl", () => {
   });
 });
 
+describe("getPreprodSnapshotUrl", () => {
+  it("should work with sentry.io", () => {
+    const apiService = new SentryApiService({ host: "sentry.io" });
+    const result = apiService.getPreprodSnapshotUrl("sentry", "12");
+    expect(result).toEqual("https://sentry.sentry.io/preprod/snapshots/12/");
+  });
+  it("should work with self-hosted", () => {
+    const apiService = new SentryApiService({ host: "sentry.example.com" });
+    const result = apiService.getPreprodSnapshotUrl("sentry", "12");
+    expect(result).toEqual(
+      "https://sentry.example.com/organizations/sentry/preprod/snapshots/12/",
+    );
+  });
+  it("should respect HTTP protocol for self-hosted", () => {
+    const apiService = new SentryApiService({
+      host: "localhost:8000",
+      protocol: "http",
+    });
+    const result = apiService.getPreprodSnapshotUrl("sentry", "12");
+    expect(result).toEqual(
+      "http://localhost:8000/organizations/sentry/preprod/snapshots/12/",
+    );
+  });
+  it("should use sentry.io (not regional) for SaaS web URL", () => {
+    const apiService = new SentryApiService({ host: "us.sentry.io" });
+    const result = apiService.getPreprodSnapshotUrl("sentry", "12");
+    expect(result).toEqual("https://sentry.sentry.io/preprod/snapshots/12/");
+  });
+});
+
 describe("getTraceUrl", () => {
   it("should work with sentry.io", () => {
     const apiService = new SentryApiService({ host: "sentry.io" });
@@ -455,6 +485,81 @@ describe("network error handling", () => {
     await expect(apiService.getAuthenticatedUser()).rejects.toThrow(
       ConfigurationError,
     );
+  });
+});
+
+describe("request headers", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("should send MCP client headers when clientId and clientName are set", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "1",
+          name: "Test User",
+          email: "test@example.com",
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+
+    const apiService = new SentryApiService({
+      host: "sentry.io",
+      accessToken: "test-token",
+      clientId: "abc123",
+      clientName: "Claude Code",
+      clientFamily: "claude-code",
+    });
+
+    await apiService.getAuthenticatedUser();
+
+    const [, requestInit] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock
+      .calls[0];
+    expect(requestInit.headers["X-Sentry-MCP-Client-Id"]).toBe("abc123");
+    expect(requestInit.headers["X-Sentry-MCP-Client-Name"]).toBe("Claude Code");
+    expect(requestInit.headers["X-Sentry-MCP-Client-Family"]).toBe(
+      "claude-code",
+    );
+  });
+
+  it("should not send MCP client headers when clientId and clientName are not set", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "1",
+          name: "Test User",
+          email: "test@example.com",
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+
+    const apiService = new SentryApiService({
+      host: "sentry.io",
+      accessToken: "test-token",
+    });
+
+    await apiService.getAuthenticatedUser();
+
+    const [, requestInit] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock
+      .calls[0];
+    expect(requestInit.headers["X-Sentry-MCP-Client-Id"]).toBeUndefined();
+    expect(requestInit.headers["X-Sentry-MCP-Client-Name"]).toBeUndefined();
+    expect(requestInit.headers["X-Sentry-MCP-Client-Family"]).toBeUndefined();
   });
 });
 
@@ -1235,6 +1340,148 @@ describe("API query builders", () => {
     });
   });
 
+  describe("trace item attributes", () => {
+    it("should list targeted attribute types with query filters", async () => {
+      const apiService = new SentryApiService({
+        host: "sentry.io",
+        accessToken: "test-token",
+      });
+      const urls: string[] = [];
+
+      globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+        urls.push(url);
+        const requestUrl = new URL(url);
+        const attributeType = requestUrl.searchParams.get("attributeType");
+        const body =
+          attributeType === "boolean"
+            ? [
+                {
+                  key: "tags[enabled,boolean]",
+                  name: "enabled",
+                  attributeType: "boolean",
+                  attributeSource: { source_type: "user" },
+                },
+              ]
+            : [
+                {
+                  key: "tags[type]",
+                  name: "type",
+                  attributeType: "string",
+                  attributeSource: {
+                    source_type: "sentry",
+                    is_transformed_alias: true,
+                  },
+                },
+              ];
+
+        return Promise.resolve({
+          ok: true,
+          headers: {
+            get: (key: string) =>
+              key === "content-type" ? "application/json" : null,
+          },
+          json: () => Promise.resolve(body),
+        });
+      });
+
+      const result = await apiService.listTraceItemAttributes({
+        organizationSlug: "test-org",
+        itemType: "spans",
+        project: "123",
+        statsPeriod: "7d",
+        attributeTypes: ["string", "boolean"],
+        substringMatch: "tags[",
+        query: 'transaction:"VPN connections"',
+      });
+
+      expect(result).toEqual([
+        {
+          key: "tags[type]",
+          name: "type",
+          type: "string",
+          attributeSource: {
+            source_type: "sentry",
+            is_transformed_alias: true,
+          },
+        },
+        {
+          key: "tags[enabled,boolean]",
+          name: "enabled",
+          type: "boolean",
+          attributeSource: { source_type: "user" },
+        },
+      ]);
+      expect(urls).toHaveLength(2);
+      for (const url of urls) {
+        const params = new URL(url).searchParams;
+        expect(params.get("itemType")).toBe("spans");
+        expect(params.get("project")).toBe("123");
+        expect(params.get("statsPeriod")).toBe("7d");
+        expect(params.get("substringMatch")).toBe("tags[");
+        expect(params.get("query")).toBe('transaction:"VPN connections"');
+      }
+      expect(
+        urls.map((url) => new URL(url).searchParams.get("attributeType")),
+      ).toEqual(["string", "boolean"]);
+    });
+
+    it("should validate exact trace item attributes", async () => {
+      const apiService = new SentryApiService({
+        host: "sentry.io",
+        accessToken: "test-token",
+      });
+      let requestUrl: string | undefined;
+      let requestOptions: RequestInit | undefined;
+
+      globalThis.fetch = vi
+        .fn()
+        .mockImplementation((url: string, options: RequestInit) => {
+          requestUrl = url;
+          requestOptions = options;
+          return Promise.resolve({
+            ok: true,
+            headers: {
+              get: (key: string) =>
+                key === "content-type" ? "application/json" : null,
+            },
+            json: () =>
+              Promise.resolve({
+                attributes: {
+                  "tags[type]": { valid: true, type: "string" },
+                  "tags[missing]": {
+                    valid: false,
+                    error: "Unknown attribute: tags[missing]",
+                  },
+                },
+              }),
+          });
+        });
+
+      const result = await apiService.validateTraceItemAttributes({
+        organizationSlug: "test-org",
+        itemType: "spans",
+        attributes: ["tags[type]", "tags[missing]"],
+        project: "123",
+        statsPeriod: "7d",
+      });
+
+      expect(result).toEqual({
+        "tags[type]": { valid: true, type: "string" },
+        "tags[missing]": {
+          valid: false,
+          error: "Unknown attribute: tags[missing]",
+        },
+      });
+      expect(requestUrl).toContain(
+        "/api/0/organizations/test-org/trace-items/attributes/validate/?itemType=spans&project=123&statsPeriod=7d",
+      );
+      expect(requestOptions?.method).toBe("POST");
+      expect(JSON.parse(String(requestOptions?.body))).toEqual({
+        attributes: ["tags[type]", "tags[missing]"],
+      });
+    });
+  });
+
   describe("Web URL builders", () => {
     describe("buildDiscoverUrl", () => {
       it("should build correct URL for errors dataset on SaaS", () => {
@@ -1522,6 +1769,177 @@ describe("API query builders", () => {
           "count()",
         ]);
       });
+    });
+  });
+
+  describe("listRepos", () => {
+    let apiService: SentryApiService;
+
+    beforeEach(() => {
+      apiService = new SentryApiService({
+        host: "sentry.io",
+        accessToken: "test-token",
+      });
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("should call the repos endpoint without query", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: {
+          get: (key: string) =>
+            key === "content-type" ? "application/json" : null,
+        },
+        json: () =>
+          Promise.resolve([
+            {
+              id: "101",
+              name: "getsentry/sentry",
+              provider: { id: "integrations:github", name: "GitHub" },
+              status: "active",
+            },
+          ]),
+      });
+
+      const repos = await apiService.listRepos({
+        organizationSlug: "test-org",
+      });
+
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/organizations/test-org/repos/"),
+        expect.any(Object),
+      );
+      expect(globalThis.fetch).not.toHaveBeenCalledWith(
+        expect.stringContaining("query="),
+        expect.any(Object),
+      );
+      expect(repos).toHaveLength(1);
+      expect(repos[0].name).toBe("getsentry/sentry");
+    });
+
+    it("should include query parameter when provided", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: {
+          get: (key: string) =>
+            key === "content-type" ? "application/json" : null,
+        },
+        json: () =>
+          Promise.resolve([
+            {
+              id: "101",
+              name: "getsentry/sentry",
+              provider: { id: "integrations:github", name: "GitHub" },
+              status: "active",
+            },
+          ]),
+      });
+
+      await apiService.listRepos({
+        organizationSlug: "test-org",
+        query: "getsentry/sentry",
+      });
+
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("query=getsentry"),
+        expect.any(Object),
+      );
+    });
+
+    it("should return empty array when no repos exist", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: {
+          get: (key: string) =>
+            key === "content-type" ? "application/json" : null,
+        },
+        json: () => Promise.resolve([]),
+      });
+
+      const repos = await apiService.listRepos({
+        organizationSlug: "test-org",
+      });
+
+      expect(repos).toHaveLength(0);
+    });
+  });
+
+  describe("linkProjectRepo", () => {
+    let apiService: SentryApiService;
+
+    beforeEach(() => {
+      apiService = new SentryApiService({
+        host: "sentry.io",
+        accessToken: "test-token",
+      });
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("should POST to the repo endpoint with repositoryId", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: {
+          get: (key: string) =>
+            key === "content-type" ? "application/json" : null,
+        },
+        json: () =>
+          Promise.resolve({
+            id: "1",
+            projectId: "456",
+            repositoryId: "101",
+            source: "scm_onboarding",
+            created: true,
+          }),
+      });
+
+      const result = await apiService.linkProjectRepo({
+        organizationSlug: "test-org",
+        projectSlug: "my-project",
+        repositoryId: 101,
+      });
+
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/projects/test-org/my-project/repo/"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ repositoryId: 101 }),
+        }),
+      );
+      expect(result.created).toBe(true);
+      expect(result.repositoryId).toBe("101");
+    });
+
+    it("should handle idempotent response", async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: {
+          get: (key: string) =>
+            key === "content-type" ? "application/json" : null,
+        },
+        json: () =>
+          Promise.resolve({
+            id: "1",
+            projectId: "456",
+            repositoryId: "101",
+            source: "manual",
+            created: false,
+          }),
+      });
+
+      const result = await apiService.linkProjectRepo({
+        organizationSlug: "test-org",
+        projectSlug: "my-project",
+        repositoryId: 101,
+      });
+
+      expect(result.created).toBe(false);
+      expect(result.source).toBe("manual");
     });
   });
 });

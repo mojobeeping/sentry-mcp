@@ -2,9 +2,11 @@ import { describe, it, expect } from "vitest";
 import {
   formatEventOutput,
   formatFrameHeader,
+  formatIssueOutput,
   getSeerActionabilityLabel,
 } from "./formatting";
-import type { Event } from "../api-client/types";
+import type { SentryApiService } from "../api-client";
+import type { AutofixRunState, Event, Issue } from "../api-client/types";
 import {
   EventBuilder,
   createFrame,
@@ -93,6 +95,66 @@ describe("getSeerActionabilityLabel", () => {
     expect(getSeerActionabilityLabel(0.25)).toBe("super_low");
     expect(getSeerActionabilityLabel(0.1)).toBe("super_low");
     expect(getSeerActionabilityLabel(0)).toBe("super_low");
+  });
+});
+
+describe("formatIssueOutput", () => {
+  it("does not use Seer provenance tags as fallback summary text", () => {
+    const output = formatIssueOutput({
+      organizationSlug: "sentry-mcp-evals",
+      issue: {
+        shortId: "CLOUDFLARE-MCP-42",
+        title: "Retry job failed",
+        count: "1",
+        userCount: 1,
+        status: "unresolved",
+        project: {
+          name: "cloudflare-mcp",
+          slug: "cloudflare-mcp",
+        },
+      } as Issue,
+      event: new EventBuilder("javascript").withId("event-1").build(),
+      apiService: {
+        getIssueUrl: () => "https://sentry.example/issues/CLOUDFLARE-MCP-42",
+      } as unknown as SentryApiService,
+      autofixState: {
+        autofix: {
+          run_id: 42,
+          request: {},
+          status: "COMPLETED",
+          updated_at: "2025-04-09T22:39:50.778146",
+          steps: [
+            {
+              type: "solution",
+              key: "solution_step_with_a_name_long_enough_to_match_summary_filter",
+              index: 0,
+              status: "COMPLETED",
+              title: "Proposed Solution",
+              output_stream: null,
+              progress: [],
+              description: "",
+              solution: [
+                {
+                  code_snippet_and_analysis:
+                    "Use the canonical issue identifier before retrying the analysis request so the summary remains readable.",
+                  is_active: true,
+                  is_most_important_event: true,
+                  relevant_code_file: null,
+                  timeline_item_type: "internal_code",
+                  title: "Normalize the issue identifier",
+                },
+              ],
+            },
+          ],
+        },
+      } as AutofixRunState,
+    });
+
+    expect(output).toContain("**Summary:**");
+    expect(output).toContain(
+      "Use the canonical issue identifier before retrying the analysis request so the summary remains readable.",
+    );
+    expect(output).not.toContain("<seer_analysis");
   });
 });
 
@@ -1893,10 +1955,10 @@ describe("formatEventOutput", () => {
         ### Span Tree (Limited to 10 spans)
 
         \`\`\`
-        GET /users [parent12 · http.server · 250ms]
-           ├─ SELECT * FROM users WHERE id = 1 [span1 · db.query · 3ms] [N+1]
-           ├─ SELECT * FROM users WHERE id = 2 [span2 · db.query · 4ms] [N+1]
-           └─ SELECT * FROM users WHERE id = 3 [span3 · db.query · 8ms] [N+1]
+        GET /users [http.server · 250ms · parent123]
+           ├─ SELECT * FROM users WHERE id = 1 [db.query · 3ms · span1] [N+1]
+           ├─ SELECT * FROM users WHERE id = 2 [db.query · 4ms · span2] [N+1]
+           └─ SELECT * FROM users WHERE id = 3 [db.query · 8ms · span3] [N+1]
         \`\`\`
 
         "
@@ -1960,9 +2022,9 @@ describe("formatEventOutput", () => {
         ### Span Tree (Limited to 10 spans)
 
         \`\`\`
-        GET /durations [parentDu · http.server · 1250ms]
-           ├─ SELECT * FROM durations WHERE bucket = 'fast' [spanA · db.query · 1ms] [N+1]
-           └─ SELECT * FROM durations WHERE bucket = 'slow' [spanB · db.query · 1500ms] [N+1]
+        GET /durations [http.server · 1250ms · parentDur]
+           ├─ SELECT * FROM durations WHERE bucket = 'fast' [db.query · 1ms · spanA] [N+1]
+           └─ SELECT * FROM durations WHERE bucket = 'slow' [db.query · 1500ms · spanB] [N+1]
         \`\`\`
 
         "

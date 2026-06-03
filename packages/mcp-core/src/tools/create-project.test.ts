@@ -10,6 +10,7 @@ describe("create_project", () => {
         name: "cloudflare-mcp",
         platform: "node",
         regionUrl: null,
+        repository: null,
       },
       {
         constraints: {
@@ -27,11 +28,53 @@ describe("create_project", () => {
       **Name**: cloudflare-mcp
       **SENTRY_DSN**: https://d20df0a1ab5031c7f3c7edca9c02814d@o4509106732793856.ingest.us.sentry.io/4509109104082945
 
-      # Using this information
+      ## Response Notes
 
-      - You can reference the **SENTRY_DSN** value to initialize Sentry's SDKs.
-      - You should always inform the user of the **SENTRY_DSN** and Project Slug values.
+      - Please tell the user the project slug and **SENTRY_DSN**.
+      - The **SENTRY_DSN** value is used to initialize Sentry SDKs.
       "
     `);
+  });
+
+  it("links repository when provided", async () => {
+    const result = await createProject.handler(
+      {
+        organizationSlug: "sentry-mcp-evals",
+        teamSlug: "the-goats",
+        name: "cloudflare-mcp",
+        platform: "node",
+        regionUrl: null,
+        repository: "getsentry/sentry",
+      },
+      {
+        constraints: {
+          organizationSlug: null,
+        },
+        accessToken: "access-token",
+        userId: "1",
+      },
+    );
+    expect(result).toContain("**Repository**: getsentry/sentry (linked)");
+  });
+
+  it("reports when repository is not found", async () => {
+    const result = await createProject.handler(
+      {
+        organizationSlug: "sentry-mcp-evals",
+        teamSlug: "the-goats",
+        name: "cloudflare-mcp",
+        platform: "node",
+        regionUrl: null,
+        repository: "nonexistent/repo",
+      },
+      {
+        constraints: {
+          organizationSlug: null,
+        },
+        accessToken: "access-token",
+        userId: "1",
+      },
+    );
+    expect(result).toContain('Could not find repository "nonexistent/repo"');
   });
 });

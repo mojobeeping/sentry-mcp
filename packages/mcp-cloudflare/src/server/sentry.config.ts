@@ -1,11 +1,10 @@
 import type { Env } from "./types";
 import { LIB_VERSION } from "@sentry/mcp-core/version";
 import * as Sentry from "@sentry/cloudflare";
+import type { CloudflareOptions } from "@sentry/cloudflare";
 import { sentryBeforeSend } from "@sentry/mcp-core/telem/sentry";
 
-type SentryConfig = ReturnType<Parameters<typeof Sentry.withSentry>[0]>;
-
-export default function getSentryConfig(env: Env): SentryConfig {
+export default function getSentryConfig(env: Env): CloudflareOptions {
   const versionId = env.CF_VERSION_METADATA?.id;
 
   return {
@@ -15,8 +14,8 @@ export default function getSentryConfig(env: Env): SentryConfig {
     beforeSend: sentryBeforeSend,
     initialScope: {
       tags: {
-        "mcp.server_version": LIB_VERSION,
-        "sentry.host": env.SENTRY_HOST,
+        "app.server.version": LIB_VERSION,
+        "app.upstream.host": env.SENTRY_HOST,
       },
     },
     ...(versionId ? { release: versionId } : {}),
@@ -33,7 +32,7 @@ export default function getSentryConfig(env: Env): SentryConfig {
   };
 }
 
-getSentryConfig.partial = (config: Partial<SentryConfig>) => {
+getSentryConfig.partial = (config: Partial<CloudflareOptions>) => {
   return (env: Env) => {
     const defaultConfig = getSentryConfig(env);
     return {

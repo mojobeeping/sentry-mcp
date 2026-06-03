@@ -825,6 +825,39 @@ export const restHandlers = buildHandlers([
     fetch: () => HttpResponse.json(tagsFixture),
   },
   {
+    method: "post",
+    path: "/api/0/organizations/sentry-mcp-evals/trace-items/attributes/validate/",
+    fetch: async ({ request }) => {
+      const body = (await request.json().catch(() => null)) as unknown;
+      const attributesValue =
+        typeof body === "object" && body !== null && "attributes" in body
+          ? body.attributes
+          : undefined;
+      const attributes = Array.isArray(attributesValue)
+        ? attributesValue.filter(
+            (attribute): attribute is string => typeof attribute === "string",
+          )
+        : [];
+
+      return HttpResponse.json({
+        attributes: Object.fromEntries(
+          attributes.map((attribute) => [
+            attribute,
+            {
+              valid: true,
+              type:
+                attribute.includes("sequence") ||
+                attribute.includes("count") ||
+                attribute.includes("duration")
+                  ? "number"
+                  : "string",
+            },
+          ]),
+        ),
+      });
+    },
+  },
+  {
     method: "get",
     path: "/api/0/organizations/sentry-mcp-evals/trace-items/attributes/",
     fetch: ({ request }) => {
@@ -1012,6 +1045,19 @@ export const restHandlers = buildHandlers([
     },
   },
   {
+    method: "post",
+    path: "/api/0/organizations/:org/issues/:issueId/notes/",
+    fetch: async ({ request }) => {
+      const body = (await request.json()) as { text: string };
+      return HttpResponse.json({
+        id: "12345",
+        text: body.text,
+        type: "note",
+        dateCreated: new Date().toISOString(),
+      });
+    },
+  },
+  {
     method: "put",
     path: "/api/0/organizations/sentry-mcp-evals/issues/CLOUDFLARE-MCP-41/",
     fetch: async ({ request }) => {
@@ -1116,6 +1162,70 @@ export const restHandlers = buildHandlers([
         headers: {
           "Content-Type": "image/png",
         },
+      });
+    },
+  },
+  // Scenario: metadata mimetype is stale "application/octet-stream" (pre-fix
+  // ingest or legacy attachment) but the download response returns the correct
+  // Content-Type. Validates that the MCP uses Step 2 (download header) over
+  // Step 1 (metadata), so the attachment is rendered as an image not a blob.
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/octet-stream-event-id/attachments/",
+    fetch: () =>
+      HttpResponse.json([
+        {
+          id: "456",
+          name: "screenshot.png",
+          type: "event.attachment",
+          size: 1024,
+          mimetype: "application/octet-stream",
+          dateCreated: "2025-04-08T21:15:04.000Z",
+          sha1: "abc123def456",
+          headers: { "Content-Type": "application/octet-stream" },
+        },
+      ]),
+  },
+  {
+    method: "get",
+    path: "/api/0/projects/sentry-mcp-evals/cloudflare-mcp/events/octet-stream-event-id/attachments/456/",
+    fetch: () => {
+      const mockBlob = new Blob(["fake image data"], { type: "image/png" });
+      return new HttpResponse(mockBlob, {
+        headers: {
+          "Content-Type": "image/png",
+        },
+      });
+    },
+  },
+  {
+    method: "get",
+    path: "/api/0/organizations/:organizationSlug/repos/",
+    fetch: () => {
+      return HttpResponse.json([
+        {
+          id: "101",
+          name: "getsentry/sentry",
+          provider: { id: "integrations:github", name: "GitHub" },
+          status: "active",
+          externalSlug: "getsentry/sentry",
+          externalId: "123456",
+          integrationId: "1",
+        },
+      ]);
+    },
+  },
+  {
+    method: "post",
+    path: "/api/0/projects/:organizationSlug/:projectSlug/repo/",
+    fetch: async ({ request }) => {
+      const body = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json({
+        id: "1",
+        projectId: "4509109104082945",
+        repositoryId: String((body?.repositoryId as string | number) || "101"),
+        source: "scm_onboarding",
+        created: true,
       });
     },
   },

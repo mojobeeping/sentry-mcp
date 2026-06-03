@@ -6,6 +6,7 @@ import type {
   ImageContent,
   EmbeddedResource,
 } from "@modelcontextprotocol/sdk/types.js";
+import { blobToBase64 } from "../internal/blob-utils";
 import {
   ParamOrganizationSlug,
   ParamProjectSlug,
@@ -77,22 +78,21 @@ export default defineTool({
 
       const contentParts: (TextContent | ImageContent | EmbeddedResource)[] =
         [];
-      const isBinary = !attachment.attachment.mimetype?.startsWith("text/");
+      // Use Content-Type from the download response (Step 2) rather than
+      // mimetype from the metadata endpoint (Step 1). The two can disagree —
+      // notably the JS RN SDK uploads attachments as "application/octet-stream"
+      // even when the file is an image — and Step 2 is the authoritative signal.
+      const effectiveMimeType = attachment.contentType;
+      const isBinary = !effectiveMimeType.startsWith("text/");
 
       if (isBinary) {
-        const isImage = attachment.attachment.mimetype?.startsWith("image/");
-        // Base64 encode the binary attachment content
-        // and add to the content as an embedded resource
-        const uint8Array = new Uint8Array(await attachment.blob.arrayBuffer());
-        let binary = "";
-        for (let i = 0; i < uint8Array.byteLength; i++) {
-          binary += String.fromCharCode(uint8Array[i]);
-        }
+        const isImage = effectiveMimeType.startsWith("image/");
+        const base64 = await blobToBase64(attachment.blob);
         if (isImage) {
           const image: ImageContent = {
             type: "image",
-            mimeType: attachment.attachment.mimetype,
-            data: btoa(binary),
+            mimeType: effectiveMimeType,
+            data: base64,
           };
           contentParts.push(image);
         } else {
@@ -100,8 +100,8 @@ export default defineTool({
             type: "resource",
             resource: {
               uri: `file://${attachment.filename}`,
-              mimeType: attachment.attachment.mimetype,
-              blob: btoa(binary),
+              mimeType: effectiveMimeType,
+              blob: base64,
             },
           };
           contentParts.push(resource);
@@ -114,7 +114,7 @@ export default defineTool({
       output += `**Filename:** ${attachment.filename}\n`;
       output += `**Type:** ${attachment.attachment.type}\n`;
       output += `**Size:** ${attachment.attachment.size} bytes\n`;
-      output += `**MIME Type:** ${attachment.attachment.mimetype}\n`;
+      output += `**MIME Type:** ${effectiveMimeType}\n`;
       output += `**Created:** ${attachment.attachment.dateCreated}\n`;
       output += `**SHA1:** ${attachment.attachment.sha1}\n\n`;
       output += `**Download URL:** ${attachment.downloadUrl}\n\n`;

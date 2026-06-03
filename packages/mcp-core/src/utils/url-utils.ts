@@ -344,6 +344,27 @@ export function getIssueUrl(
 }
 
 /**
+ * Generates a Sentry preprod snapshot URL.
+ * @param host The Sentry host (may include regional subdomain for API access)
+ * @param organizationSlug Organization identifier
+ * @param snapshotId Preprod snapshot artifact ID
+ * @returns The complete snapshot URL
+ */
+export function getPreprodSnapshotUrl(
+  host: string,
+  organizationSlug: string,
+  snapshotId: string,
+  protocol: SentryProtocol = "https",
+): string {
+  return getSentryWebBaseUrl(
+    host,
+    organizationSlug,
+    `/preprod/snapshots/${snapshotId}/`,
+    protocol,
+  );
+}
+
+/**
  * Generates a Sentry cron monitor URL.
  * @param host The Sentry host (may include regional subdomain for API access)
  * @param organizationSlug Organization identifier
@@ -520,6 +541,27 @@ export function getReplayUrl(
     host,
     organizationSlug,
     `/explore/replays/${replayId}/`,
+    protocol,
+  );
+}
+
+/**
+ * Generates a Sentry AI conversation URL.
+ * @param host The Sentry host
+ * @param organizationSlug Organization identifier
+ * @param conversationId AI conversation identifier
+ * @returns The complete AI conversation URL
+ */
+export function getAIConversationUrl(
+  host: string,
+  organizationSlug: string,
+  conversationId: string,
+  protocol: SentryProtocol = "https",
+): string {
+  return getSentryWebBaseUrl(
+    host,
+    organizationSlug,
+    `/explore/conversations/${conversationId}/`,
     protocol,
   );
 }

@@ -5,6 +5,7 @@ import {
   fetchCustomAttributes,
   formatEventValue,
   formatKnownUserValue,
+  looksLikeSentrySearchSyntax,
 } from "./utils";
 import { SentryApiService } from "../../api-client";
 import * as logging from "../../telem/logging";
@@ -195,6 +196,32 @@ describe("formatEventValue", () => {
   });
 });
 
+describe("search query helpers", () => {
+  it("should detect structured Sentry search syntax", () => {
+    expect(looksLikeSentrySearchSyntax("vpn connections from China")).toBe(
+      false,
+    );
+    expect(
+      looksLikeSentrySearchSyntax(
+        'transaction:"VPN connections" tags[type]:Unified tags[country]:CN',
+      ),
+    ).toBe(true);
+    expect(looksLikeSentrySearchSyntax("span.op:http.client")).toBe(true);
+    expect(looksLikeSentrySearchSyntax("http.status_code:500")).toBe(true);
+    expect(looksLikeSentrySearchSyntax("customer:acme")).toBe(true);
+    expect(looksLikeSentrySearchSyntax('!transaction:"healthcheck"')).toBe(
+      true,
+    );
+  });
+
+  it("should ignore common natural language colon patterns", () => {
+    expect(looksLikeSentrySearchSyntax("open http://example.com")).toBe(false);
+    expect(looksLikeSentrySearchSyntax("started at 10:30")).toBe(false);
+    expect(looksLikeSentrySearchSyntax("Note: show slow spans")).toBe(false);
+    expect(looksLikeSentrySearchSyntax("ERROR: service is down")).toBe(false);
+  });
+});
+
 describe("fetchCustomAttributes", () => {
   let apiService: SentryApiService;
 
@@ -232,10 +259,11 @@ describe("fetchCustomAttributes", () => {
       );
 
       // Should throw ApiPermissionError with the improved error message
-      // The SDK wraps errors with context, but the detail message is preserved
       await expect(
         fetchCustomAttributes(apiService, "test-org", "spans"),
-      ).rejects.toThrow("listTraceItemAttributes(string): 403 Forbidden");
+      ).rejects.toThrow(
+        "You do not have access to query across multiple projects. Please select a project for your query.",
+      );
 
       // Should NOT log - the caller handles logging
     });
@@ -254,10 +282,9 @@ describe("fetchCustomAttributes", () => {
       );
 
       // Should throw ApiPermissionError with the raw error message
-      // The SDK wraps errors with context prefix
       await expect(
         fetchCustomAttributes(apiService, "test-org", "logs", "project-123"),
-      ).rejects.toThrow("listTraceItemAttributes(string): 403 Forbidden");
+      ).rejects.toThrow("Permission denied");
     });
 
     it("should throw 404 errors for errors dataset", async () => {
@@ -299,9 +326,7 @@ describe("fetchCustomAttributes", () => {
       ).catch((e) => e);
 
       expect(error).toBeInstanceOf(Error);
-      expect(error.message).toBe(
-        "listTraceItemAttributes(string): 500 Internal Server Error",
-      );
+      expect(error.message).toBe("Internal server error");
     });
 
     it("should re-throw 502 errors", async () => {
@@ -334,10 +359,9 @@ describe("fetchCustomAttributes", () => {
         ),
       );
 
-      // The SDK wraps network errors — the context prefix is added by unwrapSdkResult
       await expect(
         fetchCustomAttributes(apiService, "test-org", "spans"),
-      ).rejects.toThrow("listTraceItemAttributes(string):");
+      ).rejects.toThrow("Network error: ETIMEDOUT");
     });
   });
 
@@ -466,6 +490,87 @@ describe("fetchCustomAttributes", () => {
           "metric.name": "string",
           "metric.type": "string",
           value: "number",
+        },
+      });
+    });
+
+    it("should pass targeted trace item attribute filters through to Sentry", async () => {
+      const requests: URLSearchParams[] = [];
+
+      mswServer.use(
+        http.get(
+          "https://sentry.io/api/0/organizations/test-org/trace-items/attributes/",
+          ({ request }) => {
+            const url = new URL(request.url);
+            requests.push(url.searchParams);
+
+            const attributeType = url.searchParams.get("attributeType");
+            if (attributeType === "string") {
+              return HttpResponse.json([
+                {
+                  key: "tags[type]",
+                  name: "type",
+                  attributeType: "string",
+                },
+              ]);
+            }
+            if (attributeType === "number") {
+              return HttpResponse.json([
+                {
+                  key: "tags[sequence,number]",
+                  name: "sequence",
+                  attributeType: "number",
+                },
+              ]);
+            }
+            if (attributeType === "boolean") {
+              return HttpResponse.json([
+                {
+                  key: "tags[enabled,boolean]",
+                  name: "enabled",
+                  attributeType: "boolean",
+                },
+              ]);
+            }
+            return HttpResponse.json([]);
+          },
+        ),
+      );
+
+      const result = await fetchCustomAttributes(
+        apiService,
+        "test-org",
+        "spans",
+        "123",
+        { statsPeriod: "7d" },
+        {
+          attributeTypes: ["string", "number", "boolean"],
+          substringMatch: "tags[",
+          query: 'transaction:"VPN connections"',
+        },
+      );
+
+      expect(requests).toHaveLength(3);
+      expect(
+        requests.map((params) => params.get("attributeType")).sort(),
+      ).toEqual(["boolean", "number", "string"]);
+      for (const params of requests) {
+        expect(params.get("itemType")).toBe("spans");
+        expect(params.get("project")).toBe("123");
+        expect(params.get("statsPeriod")).toBe("7d");
+        expect(params.get("substringMatch")).toBe("tags[");
+        expect(params.get("query")).toBe('transaction:"VPN connections"');
+      }
+      expect(result).toEqual({
+        attributes: {
+          "tags[type]": "type",
+          "tags[sequence,number]": "sequence",
+          "tags[enabled,boolean]": "enabled",
+        },
+        fieldTypes: {
+          "tags[type]": "string",
+          "tags[sequence,number]": "number",
+          "tags[enabled,boolean]": "boolean",
         },
       });
     });

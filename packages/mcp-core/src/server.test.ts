@@ -1,9 +1,10 @@
-import { describe, it, expect, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { setUser } from "@sentry/core";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { buildServer } from "./server";
-import type { ServerContext } from "./types";
 import type { ToolConfig } from "./tools/types";
+import type { ServerContext } from "./types";
 
 // Mock the Sentry core module
 vi.mock("@sentry/core", () => ({
@@ -47,6 +48,10 @@ async function listRegisteredTools(server: ReturnType<typeof buildServer>) {
 }
 
 describe("buildServer", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   const baseContext: ServerContext = {
     accessToken: "test-token",
     grantedSkills: new Set(["inspect", "triage", "project-management", "seer"]),
@@ -69,6 +74,43 @@ describe("buildServer", () => {
     annotations: {},
     handler: async () => "result",
     ...options,
+  });
+
+  describe("telemetry context", () => {
+    it("sets user ID and IP address together for tool calls", async () => {
+      const server = buildServer({
+        context: {
+          ...baseContext,
+          userId: "user-123",
+          userIpAddress: "192.0.2.1",
+        },
+        tools: {
+          example_tool: createMockTool("example_tool", {
+            annotations: { readOnlyHint: true },
+          }),
+        },
+      });
+      const registeredTools = (
+        server as unknown as {
+          _registeredTools: Record<
+            string,
+            {
+              handler: (
+                params: Record<string, unknown>,
+                extra: unknown,
+              ) => Promise<unknown>;
+            }
+          >;
+        }
+      )._registeredTools;
+
+      await registeredTools.example_tool?.handler({}, {});
+
+      expect(setUser).toHaveBeenCalledWith({
+        id: "user-123",
+        ip_address: "192.0.2.1",
+      });
+    });
   });
 
   describe("experimental tool filtering", () => {
@@ -462,6 +504,9 @@ describe("buildServer", () => {
       expect(toolNames).toContain("get_sentry_resource");
       expect(toolNames).not.toContain("get_issue_details");
       expect(toolNames).not.toContain("get_trace_details");
+      expect(toolNames).not.toContain("get_snapshot");
+      expect(toolNames).not.toContain("get_snapshot_image");
+      expect(toolNames).not.toContain("get_snapshot_details");
       // Currently no default tools are gated behind experimental visibility
       expect(toolNames.length).toBeGreaterThan(0);
     });
@@ -510,6 +555,33 @@ describe("buildServer", () => {
         expect(toolNames).toContain("get_sentry_resource");
         expect(toolNames).not.toContain("get_issue_details");
       }
+    });
+
+    it("exposes snapshot tools only when preprod skill is granted", () => {
+      const withoutPreprod = buildServer({
+        context: baseContext,
+      });
+      const withoutPreprodToolNames = getRegisteredToolNames(withoutPreprod);
+      expect(withoutPreprodToolNames).not.toContain("get_snapshot");
+      expect(withoutPreprodToolNames).not.toContain("get_snapshot_image");
+      expect(withoutPreprodToolNames).not.toContain("get_latest_base_snapshot");
+
+      const withPreprod = buildServer({
+        context: {
+          ...baseContext,
+          grantedSkills: new Set([
+            "inspect",
+            "triage",
+            "project-management",
+            "seer",
+            "preprod",
+          ]),
+        },
+      });
+      const withPreprodToolNames = getRegisteredToolNames(withPreprod);
+      expect(withPreprodToolNames).toContain("get_snapshot");
+      expect(withPreprodToolNames).toContain("get_snapshot_image");
+      expect(withPreprodToolNames).toContain("get_latest_base_snapshot");
     });
 
     it("exposes use_sentry safety annotations through tool metadata in agent mode", async () => {

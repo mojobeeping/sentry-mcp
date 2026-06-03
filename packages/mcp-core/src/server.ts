@@ -1,3 +1,4 @@
+import type { ServerOptions } from "@modelcontextprotocol/sdk/server/index.js";
 /**
  * MCP Server Configuration and Request Handling Infrastructure.
  *
@@ -19,35 +20,39 @@
  * ```
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ServerOptions } from "@modelcontextprotocol/sdk/server/index.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
-  ServerRequest,
   ServerNotification,
+  ServerRequest,
 } from "@modelcontextprotocol/sdk/types.js";
+import {
+  type SpanAttributeValue,
+  getActiveSpan,
+  setTag,
+  setUser,
+  wrapMcpServerWithSentry,
+} from "@sentry/core";
+import { isApiAuthenticationErrorDeep } from "./api-client";
+import { MCP_SERVER_NAME } from "./constants";
+import {
+  getConstraintKeysToFilter,
+  getConstraintParametersToInject,
+} from "./internal/constraint-helpers";
+import { formatErrorForUser } from "./internal/error-handling";
+import { type Skill, isEnabledBySkills } from "./skills";
+import { type LogIssueOptions, logIssue } from "./telem/logging";
 import tools from "./tools/index";
 import {
   type ToolConfig,
-  resolveDescription,
   isToolVisibleInMode,
+  resolveDescription,
 } from "./tools/types";
-import type { ServerContext, ProjectCapabilities } from "./types";
-import { isApiAuthenticationErrorDeep } from "./api-client";
-import {
-  setTag,
-  setUser,
-  getActiveSpan,
-  wrapMcpServerWithSentry,
-} from "@sentry/core";
-import { logIssue, type LogIssueOptions } from "./telem/logging";
-import { formatErrorForUser } from "./internal/error-handling";
+import type { ProjectCapabilities, ServerContext } from "./types";
 import { LIB_VERSION } from "./version";
-import { MCP_SERVER_NAME } from "./constants";
-import { isEnabledBySkills, type Skill } from "./skills";
-import {
-  getConstraintParametersToInject,
-  getConstraintKeysToFilter,
-} from "./internal/constraint-helpers";
+
+function getSkillGrantedAttributeName(skill: Skill): string {
+  return `app.consent.skill.${skill.replaceAll("-", "_")}.granted`;
+}
 
 /**
  * Creates and configures a complete MCP server with Sentry instrumentation.
@@ -178,6 +183,9 @@ function configureServer({
   const grantedSkills: Set<Skill> | undefined = context.grantedSkills
     ? new Set<Skill>(context.grantedSkills)
     : undefined;
+  const grantedSkillIds = grantedSkills
+    ? Array.from(grantedSkills).sort()
+    : undefined;
 
   server.server.onerror = (error) => {
     const transportLogOptions: LogIssueOptions = {
@@ -288,28 +296,40 @@ function configureServer({
         params: any,
         extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
       ) => {
-        // Get active span (mcp.server span) and attach more attributes to it
+        // Get the active MCP server span and attach request-scoped attributes.
         const activeSpan = getActiveSpan();
 
         if (activeSpan) {
           if (context.constraints.organizationSlug) {
             activeSpan.setAttribute(
-              "sentry-mcp.constraint-organization",
+              "app.constraint.organization_slug",
               context.constraints.organizationSlug,
             );
           }
           if (context.constraints.projectSlug) {
             activeSpan.setAttribute(
-              "sentry-mcp.constraint-project",
+              "app.constraint.project_slug",
               context.constraints.projectSlug,
             );
+          }
+          if (grantedSkillIds?.length) {
+            for (const skill of grantedSkillIds) {
+              activeSpan.setAttribute(
+                getSkillGrantedAttributeName(skill),
+                true,
+              );
+            }
           }
         }
 
         if (context.userId) {
-          setUser({
+          const user = {
             id: context.userId,
-          });
+            ...(context.userIpAddress
+              ? { ip_address: context.userIpAddress }
+              : {}),
+          };
+          setUser(user);
         }
         if (context.clientId) {
           setTag("client.id", context.clientId);
@@ -329,7 +349,21 @@ function configureServer({
           const paramsWithConstraints = {
             ...params,
             ...applicableConstraints,
-          };
+          } as Record<string, unknown>;
+
+          if (activeSpan) {
+            // Intentional GenAI semconv extension: per-key attrs like http.request.header.<key>.
+            for (const [key, value] of Object.entries(paramsWithConstraints)) {
+              const attributeValue =
+                value == null || typeof value === "object"
+                  ? JSON.stringify(value)
+                  : value;
+              activeSpan.setAttribute(
+                `gen_ai.tool.call.arguments.${key}`,
+                attributeValue as SpanAttributeValue | undefined,
+              );
+            }
+          }
 
           const output = await tool.handler(paramsWithConstraints, context);
 

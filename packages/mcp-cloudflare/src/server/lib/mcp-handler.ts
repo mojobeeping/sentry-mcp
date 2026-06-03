@@ -9,20 +9,21 @@
  */
 
 import type { ExportedHandler } from "@cloudflare/workers-types";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
+import * as Sentry from "@sentry/cloudflare";
 import { buildServer } from "@sentry/mcp-core/server";
 import { parseSkills } from "@sentry/mcp-core/skills";
 import { logWarn } from "@sentry/mcp-core/telem/logging";
 import type { ServerContext } from "@sentry/mcp-core/types";
 import { createMcpHandler } from "agents/mcp";
-import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
-import * as Sentry from "@sentry/cloudflare";
+import { annotateResponseMetric } from "../metrics";
 import type { WorkerProps } from "../types";
 import type { Env } from "../types";
 import {
-  checkRateLimit,
   MCP_RATE_LIMIT_EXCEEDED_MESSAGE,
+  checkRateLimit,
 } from "../utils/rate-limiter";
-import { annotateResponseMetric } from "../metrics";
+import { setSentryUserFromRequest } from "../utils/sentry-user";
 import { resolveClientFamily } from "./client-family";
 import { verifyConstraintsAccess } from "./constraint-utils";
 
@@ -32,6 +33,10 @@ import { verifyConstraintsAccess } from "./constraint-utils";
 type OAuthExecutionContext = ExecutionContext & {
   props?: Record<string, unknown>;
 };
+
+function getSkillGrantedAttributeName(skill: string): string {
+  return `app.consent.skill.${skill.replaceAll("-", "_")}.granted`;
+}
 
 function escapeAuthenticateHeaderValue(value: string): string {
   return value
@@ -152,10 +157,16 @@ const mcpHandler: ExportedHandler<Env> = {
     const userId = rawProps.id as string;
     const accessToken = rawProps.accessToken as string;
     const clientId = rawProps.clientId as string;
+    const clientName = rawProps.clientName;
     const sentryHost = env.SENTRY_HOST || "sentry.io";
     const clientFamily = resolveClientFamily(request.headers.get("user-agent"));
     const requestGrantId = getRequestGrantId(request);
-    Sentry.setUser({ id: userId });
+    const { ip_address: userIpAddress } = setSentryUserFromRequest(
+      request,
+      userId,
+    );
+
+    Sentry.getActiveSpan()?.setAttribute("app.client.family", clientFamily);
 
     // Parse and validate granted skills (primary authorization method)
     // Legacy tokens without grantedSkills are no longer supported
@@ -178,10 +189,10 @@ const mcpHandler: ExportedHandler<Env> = {
     // scrubber doesn't replace them with "[Filtered]" on ingest.
     if (!rawProps.refreshToken) {
       if (requestGrantId) {
-        Sentry.metrics.count("mcp.oauth.grant_revoked", 1, {
+        Sentry.metrics.count("app.oauth.grant_revoked", 1, {
           attributes: {
-            reason: "stale_props_no_refresh",
-            client_family: clientFamily,
+            "app.oauth.grant_revoked.reason": "stale_props_no_refresh",
+            "app.client.family": clientFamily,
           },
         });
       }
@@ -197,10 +208,10 @@ const mcpHandler: ExportedHandler<Env> = {
 
     if (rawProps.upstreamTokenInvalid) {
       if (requestGrantId) {
-        Sentry.metrics.count("mcp.oauth.grant_revoked", 1, {
+        Sentry.metrics.count("app.oauth.grant_revoked", 1, {
           attributes: {
-            reason: "upstream_rejected",
-            client_family: clientFamily,
+            "app.oauth.grant_revoked.reason": "upstream_rejected",
+            "app.client.family": clientFamily,
           },
         });
       }
@@ -244,6 +255,11 @@ const mcpHandler: ExportedHandler<Env> = {
         "Authorization failed: No valid skills were granted. Please re-authorize and select at least one permission.",
         { status: 400 },
       );
+    }
+
+    const activeSpan = Sentry.getActiveSpan();
+    for (const skill of Array.from(validSkills).sort()) {
+      activeSpan?.setAttribute(getSkillGrantedAttributeName(skill), true);
     }
 
     const rateLimitResult = await checkRateLimit(
@@ -311,7 +327,10 @@ const mcpHandler: ExportedHandler<Env> = {
     let upstreamUnauthorizedHandled = false;
     const serverContext: ServerContext = {
       userId,
+      userIpAddress,
       clientId,
+      clientName,
+      clientFamily,
       accessToken,
       grantedSkills: validSkills,
       constraints,
@@ -330,10 +349,10 @@ const mcpHandler: ExportedHandler<Env> = {
           });
           return;
         }
-        Sentry.metrics.count("mcp.oauth.grant_revoked", 1, {
+        Sentry.metrics.count("app.oauth.grant_revoked", 1, {
           attributes: {
-            reason: "upstream_rejected_in_use",
-            client_family: clientFamily,
+            "app.oauth.grant_revoked.reason": "upstream_rejected_in_use",
+            "app.client.family": clientFamily,
           },
         });
         ctx.waitUntil(

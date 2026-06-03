@@ -46,8 +46,13 @@ export type ServerContext = {
   sentryProtocol?: SentryProtocol;
   mcpUrl?: string;
   accessToken: string;
+  /** DCR-registered client name (freeform, as provided during Dynamic Client Registration) */
+  clientName?: string | null;
+  /** Bucketed client family (e.g. "claude-code", "cursor") resolved from User-Agent */
+  clientFamily?: string | null;
   openaiBaseUrl?: string;
   userId?: string | null;
+  userIpAddress?: string | null;
   clientId?: string;
   /** Primary authorization method - granted skills for tool access control */
   grantedSkills?: Set<Skill> | ReadonlySet<Skill>;

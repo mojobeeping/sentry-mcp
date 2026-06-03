@@ -28,8 +28,9 @@ Before constructing ANY query, you MUST verify field availability:
 2. This includes ALL fields: custom attributes, database fields, HTTP fields, AI fields, user fields, etc.
 3. Fields vary by project based on what data is being sent to Sentry
 4. Using an unverified field WILL cause your query to fail with "field not found" errors
-5. The datasetAttributes tool tells you EXACTLY which fields are available
-6. Replay fields vary by project too, so use replayFields before constructing replay queries
+5. For spans, logs, and metrics, datasetAttributes can validate exact field names with attributes and can list likely fields using substringMatch/query/attributeTypes
+6. A broad datasetAttributes listing is a discovery preview and may be truncated; do not treat absence from the preview as proof that a user-supplied field is invalid
+7. Replay fields vary by project too, so use replayFields before constructing replay queries
 
 TOOL USAGE GUIDELINES:
 1. Use datasetAttributes tool to discover available fields for your chosen dataset
@@ -37,6 +38,8 @@ TOOL USAGE GUIDELINES:
 3. Use otelSemantics tool when you need specific OpenTelemetry semantic convention attributes
 4. Use whoami tool when queries contain "me" references for user.id or user.email fields
 5. IMPORTANT: For ambiguous terms like "user agents", "browser", "client" - use the appropriate field discovery tool instead of guessing field names
+6. When the user already supplied Sentry search syntax for spans/logs/metrics, call datasetAttributes with exact attributes from the query or fields before dropping or renaming them
+7. Use datasetAttributes substringMatch, query, and attributeTypes for targeted lookup when broad field discovery is truncated
 
 CRITICAL - TOOL RESPONSE HANDLING:
 All tools return responses in this format: {error?: string, result?: data}
@@ -164,8 +167,8 @@ Performance Query Patterns (use duck typing):
 - Database: has:db.statement or has:db.system
 - HTTP/API calls: has:http.method or has:http.url
 - External Services: has:http.url (for outbound calls)
-- AI/LLM: has:gen_ai.system or has:gen_ai.request.model
-- MCP Tools: has:mcp.tool.name
+- AI/LLM: has:gen_ai.provider.name or has:gen_ai.request.model
+- MCP Tools: has:gen_ai.tool.name
 
 WHEN TO USE is_transaction:true (rare):
 - ONLY when you specifically need transaction boundaries (full request/response cycle)
@@ -323,14 +326,17 @@ export const DATASET_FIELDS = {
     // OpenTelemetry attribute namespaces for semantic queries
     // Use has:namespace.* to find spans with any attribute in that namespace
     // GenAI namespace (gen_ai.*) - for AI/LLM/Agent calls
-    "gen_ai.system": "AI system (e.g., anthropic, openai)",
+    "gen_ai.provider.name": "AI provider name (e.g., anthropic, openai)",
     "gen_ai.request.model": "Model name (e.g., claude-3-5-sonnet-20241022)",
     "gen_ai.operation.name": "Operation type (e.g., chat, completion)",
     "gen_ai.usage.input_tokens": "Number of input tokens (numeric)",
     "gen_ai.usage.output_tokens": "Number of output tokens (numeric)",
+    "gen_ai.tool.name": "Tool name (e.g., search_issues, search_events)",
 
-    // MCP namespace (mcp.*) - for Model Context Protocol tool calls
-    "mcp.tool.name": "Tool name (e.g., search_issues, search_events)",
+    // MCP namespace (mcp.*) - for Model Context Protocol semantics
+    "mcp.method.name": "MCP request or notification method",
+    "mcp.protocol.version": "MCP protocol version",
+    "mcp.resource.uri": "MCP resource URI",
     "mcp.session.id": "MCP session identifier",
 
     // Web Vitals measurements (frontend performance metrics)
@@ -581,8 +587,8 @@ export const DATASET_EXAMPLES: Record<
     {
       description: "top MCP tool calls by usage",
       output: {
-        query: "has:mcp.tool.name",
-        fields: ["mcp.tool.name", "count()"],
+        query: "has:gen_ai.tool.name",
+        fields: ["gen_ai.tool.name", "count()"],
         sort: "-count()",
       },
     },

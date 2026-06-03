@@ -15,7 +15,6 @@ import {
   listAnOrganization_sReplays as sdkListAnOrganizationSReplays,
   listAnOrganization_sTeams as sdkListAnOrganizationSTeams,
   listRecordingSegments as sdkListRecordingSegments,
-  listTraceItemAttributes as sdkListTraceItemAttributes,
   listYourOrganizations as sdkListYourOrganizations,
   queryExploreEventsInTableFormat as sdkQueryExploreEvents,
   retrieveACountOfReplaysForAGivenIssueOrTransaction as sdkRetrieveACountOfReplays,
@@ -49,8 +48,10 @@ import {
 import {
   type TraceMetricIdentifier,
   getContinuousProfileUrl as getContinuousProfileUrlUtil,
+  getAIConversationUrl as getAIConversationUrlUtil,
   getIssueUrl as getIssueUrlUtil,
   getMonitorUrl as getMonitorUrlUtil,
+  getPreprodSnapshotUrl as getPreprodSnapshotUrlUtil,
   getProfileUrl as getProfileUrlUtil,
   getProfilingExplorerUrl,
   getReleaseUrl as getReleaseUrlUtil,
@@ -68,6 +69,7 @@ import {
   AutofixRunStateSchema,
   ClientKeyListSchema,
   ClientKeySchema,
+  AIConversationSpanListSchema,
   ErrorsSearchResponseSchema,
   EventAttachmentListSchema,
   EventSchema,
@@ -80,12 +82,14 @@ import {
   OrganizationSchema,
   ProfileChunkResponseSchema,
   ProjectListSchema,
+  ProjectRepoLinkSchema,
   ProjectSchema,
   ReleaseListSchema,
   ReplayDetailsSchema,
   ReplayIdsByResourceSchema,
   ReplayListResponseSchema,
   ReplayRecordingSegmentsSchema,
+  RepositoryListSchema,
   SpansSearchResponseSchema,
   TagListSchema,
   TeamListSchema,
@@ -124,6 +128,7 @@ import type {
   TraceMeta,
   TransactionProfile,
   User,
+  AIConversationSpanList,
 } from "./types";
 // TODO: this is shared - so ideally, for safety, it uses @sentry/core, but currently
 // logger isnt exposed (or rather, it is, but its not the right logger)
@@ -140,6 +145,25 @@ const NETWORK_ERROR_MESSAGES: Record<string, string> = {
   ETIMEDOUT: "Connection timed out. Check network connectivity.",
   ECONNRESET: "Connection reset. Try again in a moment.",
 };
+
+function getNextCursor(linkHeader: string | null): string | null {
+  if (!linkHeader) {
+    return null;
+  }
+
+  for (const link of linkHeader.split(",")) {
+    if (!link.includes('rel="next"') || !link.includes('results="true"')) {
+      continue;
+    }
+
+    const cursorMatch = link.match(/cursor="([^"]+)"/);
+    if (cursorMatch?.[1]) {
+      return cursorMatch[1];
+    }
+  }
+
+  return null;
+}
 
 /**
  * Custom error class for Sentry API responses.
@@ -162,6 +186,98 @@ const NETWORK_ERROR_MESSAGES: Record<string, string> = {
 type RequestOptions = {
   host?: string;
 };
+
+export type TraceItemType = "spans" | "logs" | "tracemetrics";
+export type TraceItemAttributeType = "string" | "number" | "boolean";
+export type TraceItemAttributeSourceType = "sentry" | "user";
+
+export type TraceItemAttributeSource = {
+  source_type: TraceItemAttributeSourceType;
+  is_transformed_alias?: boolean;
+};
+
+export type TraceItemAttribute = {
+  key: string;
+  name: string;
+  type: TraceItemAttributeType;
+  attributeSource?: TraceItemAttributeSource;
+  secondaryAliases?: string[];
+};
+
+export type TraceItemAttributeValidationResult = {
+  valid: boolean;
+  type?: TraceItemAttributeType;
+  error?: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isTraceItemAttributeType(
+  value: unknown,
+): value is TraceItemAttributeType {
+  return value === "string" || value === "number" || value === "boolean";
+}
+
+function isTraceItemAttributeSourceType(
+  value: unknown,
+): value is TraceItemAttributeSourceType {
+  return value === "sentry" || value === "user";
+}
+
+function parseTraceItemAttributeSource(
+  value: unknown,
+): TraceItemAttributeSource | undefined {
+  if (!isRecord(value) || !isTraceItemAttributeSourceType(value.source_type)) {
+    return undefined;
+  }
+
+  const source: TraceItemAttributeSource = { source_type: value.source_type };
+  if (typeof value.is_transformed_alias === "boolean") {
+    source.is_transformed_alias = value.is_transformed_alias;
+  }
+  return source;
+}
+
+function parseTraceItemAttributes(
+  body: unknown,
+  fallbackType: TraceItemAttributeType,
+): TraceItemAttribute[] {
+  if (!Array.isArray(body)) {
+    return [];
+  }
+
+  const attributes: TraceItemAttribute[] = [];
+  for (const value of body) {
+    if (!isRecord(value) || typeof value.key !== "string") {
+      continue;
+    }
+
+    const attribute: TraceItemAttribute = {
+      key: value.key,
+      name: typeof value.name === "string" ? value.name : value.key,
+      type: isTraceItemAttributeType(value.attributeType)
+        ? value.attributeType
+        : fallbackType,
+    };
+
+    const attributeSource = parseTraceItemAttributeSource(
+      value.attributeSource,
+    );
+    if (attributeSource) {
+      attribute.attributeSource = attributeSource;
+    }
+    if (Array.isArray(value.secondaryAliases)) {
+      attribute.secondaryAliases = value.secondaryAliases.filter(
+        (alias): alias is string => typeof alias === "string",
+      );
+    }
+    attributes.push(attribute);
+  }
+
+  return attributes;
+}
 
 /**
  * Sentry API client service for interacting with Sentry's REST API.
@@ -209,6 +325,9 @@ type RequestOptions = {
  */
 export class SentryApiService {
   private accessToken: string | null;
+  private clientId: string | null;
+  private clientName: string | null;
+  private clientFamily: string | null;
   protected host: string;
   protected protocol: SentryProtocol;
   protected apiPrefix: string;
@@ -221,17 +340,29 @@ export class SentryApiService {
    * @param config Configuration object
    * @param config.accessToken OAuth access token for authentication (optional for some endpoints)
    * @param config.host Sentry hostname (e.g. "sentry.io", "sentry.example.com")
+   * @param config.clientId DCR-registered OAuth client ID
+   * @param config.clientName DCR-registered OAuth client name
+   * @param config.clientFamily Bucketed client family (e.g. "claude-code", "cursor")
    */
   constructor({
     accessToken = null,
     host = "sentry.io",
     protocol = "https",
+    clientId = null,
+    clientName = null,
+    clientFamily = null,
   }: {
     accessToken?: string | null;
     host?: string;
     protocol?: SentryProtocol;
+    clientId?: string | null;
+    clientName?: string | null;
+    clientFamily?: string | null;
   }) {
     this.accessToken = accessToken;
+    this.clientId = clientId;
+    this.clientName = clientName;
+    this.clientFamily = clientFamily;
     this.host = host;
     this.protocol = protocol;
     this.apiPrefix = `${protocol}://${host}/api/0`;
@@ -392,6 +523,15 @@ export class SentryApiService {
     };
     if (this.accessToken) {
       headers.Authorization = `Bearer ${this.accessToken}`;
+    }
+    if (this.clientId) {
+      headers["X-Sentry-MCP-Client-Id"] = this.clientId;
+    }
+    if (this.clientName) {
+      headers["X-Sentry-MCP-Client-Name"] = this.clientName;
+    }
+    if (this.clientFamily) {
+      headers["X-Sentry-MCP-Client-Family"] = this.clientFamily;
     }
 
     // Check if fetch is available, otherwise provide a helpful error message
@@ -650,6 +790,18 @@ export class SentryApiService {
       this.host,
       organizationSlug,
       replayId,
+      this.protocol,
+    );
+  }
+
+  getAIConversationUrl(
+    organizationSlug: string,
+    conversationId: string,
+  ): string {
+    return getAIConversationUrlUtil(
+      this.host,
+      organizationSlug,
+      conversationId,
       this.protocol,
     );
   }
@@ -1412,6 +1564,49 @@ export class SentryApiService {
     return ProjectSchema.parse(data);
   }
 
+  async listRepos(
+    {
+      organizationSlug,
+      query,
+    }: {
+      organizationSlug: string;
+      query?: string;
+    },
+    opts?: RequestOptions,
+  ) {
+    const params = new URLSearchParams();
+    if (query) {
+      params.set("query", query);
+    }
+    const qs = params.toString();
+    const url = `/organizations/${organizationSlug}/repos/${qs ? `?${qs}` : ""}`;
+    const body = await this.requestJSON(url, { method: "GET" }, opts);
+    return RepositoryListSchema.parse(body);
+  }
+
+  async linkProjectRepo(
+    {
+      organizationSlug,
+      projectSlug,
+      repositoryId,
+    }: {
+      organizationSlug: string;
+      projectSlug: string;
+      repositoryId: number | string;
+    },
+    opts?: RequestOptions,
+  ) {
+    const body = await this.requestJSON(
+      `/projects/${organizationSlug}/${projectSlug}/repo/`,
+      {
+        method: "POST",
+        body: JSON.stringify({ repositoryId }),
+      },
+      opts,
+    );
+    return ProjectRepoLinkSchema.parse(body);
+  }
+
   /**
    * Assigns a team to a project.
    *
@@ -1735,84 +1930,133 @@ export class SentryApiService {
       statsPeriod,
       start,
       end,
+      attributeTypes = ["string", "number"],
+      substringMatch,
+      query,
     }: {
       organizationSlug: string;
-      itemType?: "spans" | "logs" | "tracemetrics";
+      itemType?: TraceItemType;
+      project?: string;
+      statsPeriod?: string;
+      start?: string;
+      end?: string;
+      attributeTypes?: TraceItemAttributeType[];
+      substringMatch?: string;
+      query?: string;
+    },
+    opts?: RequestOptions,
+  ): Promise<TraceItemAttribute[]> {
+    const uniqueAttributeTypes = Array.from(new Set(attributeTypes));
+    const attributeResponses = await Promise.all(
+      uniqueAttributeTypes.map((attributeType) =>
+        this.fetchTraceItemAttributesByType(
+          organizationSlug,
+          itemType,
+          attributeType,
+          project,
+          statsPeriod,
+          start,
+          end,
+          substringMatch,
+          query,
+          opts,
+        ),
+      ),
+    );
+
+    return attributeResponses.flat();
+  }
+
+  async validateTraceItemAttributes(
+    {
+      organizationSlug,
+      itemType = "spans",
+      attributes,
+      project,
+      statsPeriod,
+      start,
+      end,
+    }: {
+      organizationSlug: string;
+      itemType?: TraceItemType;
+      attributes: string[];
       project?: string;
       statsPeriod?: string;
       start?: string;
       end?: string;
     },
     opts?: RequestOptions,
-  ): Promise<Array<{ key: string; name: string; type: "string" | "number" }>> {
-    const timeParams: Record<string, string> = {};
-    if (statsPeriod) {
-      timeParams.statsPeriod = statsPeriod;
-    } else if (start && end) {
-      timeParams.start = start;
-      timeParams.end = end;
+  ): Promise<Record<string, TraceItemAttributeValidationResult>> {
+    const queryParams = new URLSearchParams();
+    queryParams.set("itemType", itemType);
+    if (project) {
+      queryParams.set("project", project);
+    }
+    this.applyTimeParams(queryParams, statsPeriod, start, end);
+
+    const body = await this.requestJSON(
+      `/organizations/${organizationSlug}/trace-items/attributes/validate/?${queryParams.toString()}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ attributes }),
+      },
+      opts,
+    );
+
+    if (!isRecord(body) || !isRecord(body.attributes)) {
+      return {};
     }
 
-    // Fetch both string and number attributes in parallel via SDK
-    const [stringResult, numberResult] = await Promise.all([
-      sdkListTraceItemAttributes({
-        ...this.getSdkConfig(opts),
-        path: { organization_id_or_slug: organizationSlug },
-        query: {
-          itemType,
-          attributeType: ["string"],
-          ...timeParams,
-          ...(project ? { project: Number(project) } : {}),
-        },
-      } as Parameters<typeof sdkListTraceItemAttributes>[0]),
-      sdkListTraceItemAttributes({
-        ...this.getSdkConfig(opts),
-        path: { organization_id_or_slug: organizationSlug },
-        query: {
-          itemType,
-          attributeType: ["number"],
-          ...timeParams,
-          ...(project ? { project: Number(project) } : {}),
-        },
-      } as Parameters<typeof sdkListTraceItemAttributes>[0]),
-    ]);
-
-    const stringAttributes = this.unwrapSdkResult<
-      Array<{ key: string; name?: string }>
-    >(stringResult, "listTraceItemAttributes(string)");
-    const numberAttributes = this.unwrapSdkResult<
-      Array<{ key: string; name?: string }>
-    >(numberResult, "listTraceItemAttributes(number)");
-
-    const allAttributes: Array<{
-      key: string;
-      name: string;
-      type: "string" | "number";
-    }> = [];
-
-    for (const attr of Array.isArray(stringAttributes)
-      ? stringAttributes
-      : []) {
-      allAttributes.push({
-        key: attr.key,
-        name: attr.name || attr.key,
-        type: "string",
-      });
+    const results: Record<string, TraceItemAttributeValidationResult> = {};
+    for (const [attribute, value] of Object.entries(body.attributes)) {
+      if (!isRecord(value) || typeof value.valid !== "boolean") {
+        continue;
+      }
+      const validationResult: TraceItemAttributeValidationResult = {
+        valid: value.valid,
+      };
+      if (isTraceItemAttributeType(value.type)) {
+        validationResult.type = value.type;
+      }
+      if (typeof value.error === "string") {
+        validationResult.error = value.error;
+      }
+      results[attribute] = validationResult;
     }
-
-    for (const attr of Array.isArray(numberAttributes)
-      ? numberAttributes
-      : []) {
-      allAttributes.push({
-        key: attr.key,
-        name: attr.name || attr.key,
-        type: "number",
-      });
-    }
-
-    return allAttributes;
+    return results;
   }
 
+  private async fetchTraceItemAttributesByType(
+    organizationSlug: string,
+    itemType: TraceItemType,
+    attributeType: TraceItemAttributeType,
+    project?: string,
+    statsPeriod?: string,
+    start?: string,
+    end?: string,
+    substringMatch?: string,
+    query?: string,
+    opts?: RequestOptions,
+  ): Promise<TraceItemAttribute[]> {
+    const queryParams = new URLSearchParams();
+    queryParams.set("itemType", itemType);
+    queryParams.set("attributeType", attributeType);
+    if (project) {
+      queryParams.set("project", project);
+    }
+    if (substringMatch) {
+      queryParams.set("substringMatch", substringMatch);
+    }
+    if (query) {
+      queryParams.set("query", query);
+    }
+    this.applyTimeParams(queryParams, statsPeriod, start, end);
+
+    const url = `/organizations/${organizationSlug}/trace-items/attributes/?${queryParams.toString()}`;
+
+    const body = await this.requestJSON(url, undefined, opts);
+    return parseTraceItemAttributes(body, attributeType);
+  }
   /**
    * Lists issues within an organization or project.
    *
@@ -2214,6 +2458,7 @@ export class SentryApiService {
     downloadUrl: string;
     filename: string;
     blob: Blob;
+    contentType: string;
   }> {
     // Get the attachment metadata via SDK
     const attachments = await this.listEventAttachments(
@@ -2234,20 +2479,24 @@ export class SentryApiService {
     const downloadUrl = `/projects/${organizationSlug}/${projectSlug}/events/${eventId}/attachments/${attachmentId}/?download=1`;
     const downloadResponse = await this.request(
       downloadUrl,
-      {
-        method: "GET",
-        headers: {
-          Accept: "application/octet-stream",
-        },
-      },
+      { method: "GET" },
       opts,
     );
+
+    // Prefer Content-Type from the download response over the metadata mimetype:
+    // the two share the same DB source but the download header reflects any
+    // server-side correction (getsentry/sentry#115977) applied at request time.
+    const contentType =
+      downloadResponse.headers.get("content-type")?.split(";")[0].trim() ||
+      attachment.mimetype ||
+      "application/octet-stream";
 
     return {
       attachment,
       downloadUrl: downloadResponse.url,
       filename: attachment.name,
       blob: await downloadResponse.blob(),
+      contentType,
     };
   }
 
@@ -2383,6 +2632,28 @@ export class SentryApiService {
     });
     const data = this.unwrapSdkResult(result, "updateIssue");
     return IssueSchema.parse(data);
+  }
+
+  async createIssueComment(
+    {
+      organizationSlug,
+      issueId,
+      text,
+    }: {
+      organizationSlug: string;
+      issueId: string;
+      text: string;
+    },
+    opts?: RequestOptions,
+  ): Promise<void> {
+    await this.requestJSON(
+      `/organizations/${organizationSlug}/issues/${issueId}/notes/`,
+      {
+        method: "POST",
+        body: JSON.stringify({ text }),
+      },
+      opts,
+    );
   }
 
   // TODO: Sentry is not yet exposing a reasonable API to fetch trace data
@@ -2889,6 +3160,56 @@ export class SentryApiService {
     return TraceSchema.parse(data);
   }
 
+  async getAIConversation(
+    {
+      organizationSlug,
+      conversationId,
+      project = "-1",
+      statsPeriod = "30d",
+      perPage = 1000,
+      maxPages = 10,
+    }: {
+      organizationSlug: string;
+      conversationId: string;
+      project?: string | string[];
+      statsPeriod?: string;
+      perPage?: number;
+      maxPages?: number;
+    },
+    opts?: RequestOptions,
+  ): Promise<AIConversationSpanList> {
+    const spans: AIConversationSpanList = [];
+    let cursor: string | null = null;
+
+    for (let page = 0; page < maxPages; page++) {
+      const queryParams = new URLSearchParams();
+      queryParams.set("per_page", String(perPage));
+      queryParams.set("statsPeriod", statsPeriod);
+      const projects = Array.isArray(project) ? project : [project];
+      for (const projectId of projects) {
+        queryParams.append("project", projectId);
+      }
+      if (cursor) {
+        queryParams.set("cursor", cursor);
+      }
+
+      const response = await this.request(
+        `/organizations/${organizationSlug}/ai-conversations/${encodeURIComponent(conversationId)}/?${queryParams.toString()}`,
+        undefined,
+        opts,
+      );
+      const body = await this.parseJsonResponse(response);
+      spans.push(...AIConversationSpanListSchema.parse(body));
+
+      cursor = getNextCursor(response.headers.get("link"));
+      if (!cursor) {
+        break;
+      }
+    }
+
+    return spans;
+  }
+
   /**
    * Retrieves flamegraph data for a transaction.
    *
@@ -3049,5 +3370,93 @@ export class SentryApiService {
     }
 
     return response.chunks[0];
+  }
+
+  getPreprodSnapshotUrl(organizationSlug: string, snapshotId: string): string {
+    return getPreprodSnapshotUrlUtil(
+      this.host,
+      organizationSlug,
+      snapshotId,
+      this.protocol,
+    );
+  }
+
+  async getSnapshotDetails({
+    organizationSlug,
+    snapshotId,
+    compactMetadata = true,
+  }: {
+    organizationSlug: string;
+    snapshotId: string;
+    compactMetadata?: boolean;
+  }): Promise<unknown> {
+    const params = new URLSearchParams();
+    if (compactMetadata) {
+      params.set("compact_metadata", "true");
+    }
+    const path = `/organizations/${encodeURIComponent(organizationSlug)}/preprodartifacts/snapshots/${encodeURIComponent(snapshotId)}/?${params.toString()}`;
+    return this.requestJSON(path);
+  }
+
+  async getSnapshotImageDetail({
+    organizationSlug,
+    snapshotId,
+    imageIdentifier,
+  }: {
+    organizationSlug: string;
+    snapshotId: string;
+    imageIdentifier: string;
+  }): Promise<unknown> {
+    const path = `/organizations/${encodeURIComponent(organizationSlug)}/preprodartifacts/snapshots/${encodeURIComponent(snapshotId)}/images/${encodeURIComponent(imageIdentifier)}/`;
+    return this.requestJSON(path);
+  }
+
+  async fetchImageByUrl(
+    imageUrl: string,
+  ): Promise<{ blob: Blob; contentType: string }> {
+    const response = imageUrl.startsWith("https://")
+      ? await fetch(imageUrl)
+      : await this.request(
+          imageUrl.startsWith("/api/0")
+            ? imageUrl.slice("/api/0".length)
+            : imageUrl,
+        );
+    if (!response.ok) {
+      throw new Error(
+        `Failed to fetch image: ${response.status} ${response.statusText}`,
+      );
+    }
+    const blob = await response.blob();
+    let contentType = response.headers.get("content-type") ?? "";
+    if (!contentType.startsWith("image/")) {
+      const { detectImageMimeType } = await import("../internal/blob-utils.js");
+      contentType = (await detectImageMimeType(blob)) ?? contentType;
+    }
+    return { blob, contentType };
+  }
+
+  async getLatestBaseSnapshot({
+    organizationSlug,
+    appId,
+    branch,
+    project,
+    projectSlug,
+    compactMetadata = true,
+  }: {
+    organizationSlug: string;
+    appId: string;
+    branch?: string;
+    project?: string;
+    projectSlug?: string;
+    compactMetadata?: boolean;
+  }): Promise<unknown> {
+    const params = new URLSearchParams();
+    params.set("app_id", appId);
+    if (branch) params.set("branch", branch);
+    if (project) params.set("project", project);
+    if (projectSlug) params.set("projectSlug", projectSlug);
+    if (compactMetadata) params.set("compact_metadata", "true");
+    const path = `/organizations/${encodeURIComponent(organizationSlug)}/preprodartifacts/snapshots/latest-base/?${params.toString()}`;
+    return this.requestJSON(path);
   }
 }

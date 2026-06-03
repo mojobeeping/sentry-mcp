@@ -1090,15 +1090,16 @@ function renderPerformanceSpanTree(spans: PerformanceSpan[]): string[] {
     const connector = prefix === "" ? "" : isLast ? "└─ " : "├─ ";
 
     const displayName = span.description?.trim() || span.op || "unnamed";
-    const shortId = span.span_id ? span.span_id.substring(0, 8) : "unknown";
+    const spanId = span.span_id ?? "unknown";
     const durationDisplay =
       span.duration > 0 ? `${Math.round(span.duration)}ms` : "unknown";
 
-    const metadataParts: string[] = [shortId];
+    // Full span ID goes last so human-readable parts read first.
+    const metadataParts: string[] = [];
     if (span.op && span.op !== "default") {
       metadataParts.push(span.op);
     }
-    metadataParts.push(durationDisplay);
+    metadataParts.push(durationDisplay, spanId);
 
     const line = `${prefix}${connector}${displayName} [${metadataParts.join(
       " · ",
@@ -1654,7 +1655,9 @@ function formatSeerSummary(autofixState: AutofixRunState | undefined): string {
         parts.push(solutionDescription.trim());
       } else {
         // Fallback to extracting from output if no description
-        const solutionOutput = getOutputForAutofixStep(solutionStep);
+        const solutionOutput = getOutputForAutofixStep(solutionStep, {
+          includeProvenanceTags: false,
+        });
         const lines = solutionOutput.split("\n");
         const firstParagraph = lines.find(
           (line) =>
@@ -1925,13 +1928,24 @@ export function formatIssueOutput({
     output += "\n";
   }
 
-  output += "# Using this information\n\n";
-  output += `- You can reference the IssueID in commit messages (e.g. \`Fixes ${issue.shortId}\`) to automatically close the issue when the commit is merged.\n`;
+  const traceId =
+    typeof event.contexts?.trace?.trace_id === "string" &&
+    event.contexts.trace.trace_id.length > 0
+      ? event.contexts.trace.trace_id
+      : undefined;
+
+  output += "## Response Notes\n\n";
+  output += `- Commit message issue reference: \`Fixes ${issue.shortId}\` automatically closes the issue when the commit is merged.\n`;
   output +=
-    "- The stacktrace includes both first-party application code as well as third-party code, its important to triage to first-party code.\n";
-  output += `- To search for specific occurrences or filter events within this issue, use \`search_issue_events(organizationSlug='${organizationSlug}', issueId='${issue.shortId}', query='your query')\`\n`;
+    "- The stacktrace includes first-party application code and third-party code. First-party frames are usually the best starting point for triage.\n";
+  output += `- Issue event search: \`search_issue_events(organizationSlug='${organizationSlug}', issueId='${issue.shortId}', query='your query')\`\n`;
+  if (traceId) {
+    output += `- Full distributed trace and span tree: \`get_sentry_resource(resourceType='trace', organizationSlug='${organizationSlug}', resourceId='${traceId}')\`\n`;
+    output += `- Related span search: \`search_events(organizationSlug='${organizationSlug}', dataset='spans', query='trace:${traceId}')\`\n`;
+    output += `- Related log search: \`search_events(organizationSlug='${organizationSlug}', dataset='logs', query='trace:${traceId}')\`\n`;
+  }
   if (experimentalMode) {
-    output += `- To see the trail of events leading up to this error, use \`get_sentry_resource(url='${apiService.getIssueUrl(organizationSlug, issue.shortId)}', resourceType='breadcrumbs')\`\n`;
+    output += `- Breadcrumb trail leading up to this error: \`get_sentry_resource(url='${apiService.getIssueUrl(organizationSlug, issue.shortId)}', resourceType='breadcrumbs')\`\n`;
   }
   return output;
 }

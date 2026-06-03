@@ -2,7 +2,7 @@ import type {
   TokenExchangeCallbackOptions,
   TokenExchangeCallbackResult,
 } from "@cloudflare/workers-oauth-provider";
-import type { z } from "zod";
+import * as Sentry from "@sentry/cloudflare";
 import {
   ApiClientError,
   ApiRateLimitError,
@@ -10,9 +10,10 @@ import {
   SentryApiService,
 } from "@sentry/mcp-core/api-client";
 import { logIssue, logWarn } from "@sentry/mcp-core/telem/logging";
-import { TokenResponseSchema } from "./constants";
+import type { z } from "zod";
 import type { WorkerProps } from "../types";
-import * as Sentry from "@sentry/cloudflare";
+import { setSentryUserFromRequest } from "../utils/sentry-user";
+import { TokenResponseSchema } from "./constants";
 
 function escapeHtml(value: string): string {
   return value
@@ -447,9 +448,9 @@ function recordTokenExchangeOutcome(
   outcome: TokenExchangeOutcome,
   attributes?: Record<string, string>,
 ): void {
-  Sentry.metrics.count("mcp.oauth.token_exchange", 1, {
+  Sentry.metrics.count("app.oauth.token_exchange", 1, {
     attributes: {
-      outcome,
+      "app.oauth.token_exchange.outcome": outcome,
       ...attributes,
     },
   });
@@ -550,7 +551,8 @@ async function probeUpstreamAccessToken(
 export async function tokenExchangeCallback(
   options: TokenExchangeCallbackOptions,
   env: TokenExchangeEnv,
-  clientFamily = "unknown",
+  request: Request,
+  clientFamily: string,
 ): Promise<TokenExchangeCallbackResult | undefined> {
   if (options.grantType !== "refresh_token") {
     return undefined;
@@ -558,7 +560,7 @@ export async function tokenExchangeCallback(
 
   const rawProps = options.props as StoredGrantProps;
 
-  Sentry.setUser({ id: rawProps.id });
+  setSentryUserFromRequest(request, rawProps.id);
 
   if (!rawProps.refreshToken) {
     // Stale grant from before refreshToken was stored in props.
@@ -586,8 +588,8 @@ export async function tokenExchangeCallback(
     const remainingMs = expiresAt - Date.now();
     if (remainingMs > SAFE_WINDOW_MS) {
       recordTokenExchangeOutcome("cached_valid_local", {
-        grant_shape: "refreshable",
-        client_family: clientFamily,
+        "app.oauth.grant.shape": "refreshable",
+        "app.client.family": clientFamily,
       });
       return buildSuccessfulTokenExchangeResult(
         props,
@@ -607,14 +609,14 @@ export async function tokenExchangeCallback(
   // Metric attribute (not span attribute): Sentry.getActiveSpan() is
   // undefined inside tokenExchangeCallback.
   const outcomeAttributes: Record<string, string> = {
-    grant_shape: "refreshable",
-    client_family: clientFamily,
+    "app.oauth.grant.shape": "refreshable",
+    "app.client.family": clientFamily,
   };
   if (typeof status === "number") {
-    outcomeAttributes.probe_status = String(status);
+    outcomeAttributes["app.oauth.probe.status_code"] = String(status);
   }
   if (reason) {
-    outcomeAttributes.probe_reason = reason;
+    outcomeAttributes["app.oauth.probe.reason"] = reason;
   }
   switch (outcome) {
     case "cached_valid_probed": {
