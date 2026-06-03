@@ -1302,7 +1302,7 @@ export class SentryApiService {
       const result = await sdkListYourOrganizations({
         ...this.getSdkConfig(opts),
         query: { query: params?.query, per_page: 25 },
-      } as Parameters<typeof sdkListYourOrganizations>[0]);
+      });
       const data = this.unwrapSdkResult(result, "listOrganizations");
       return OrganizationListSchema.parse(data);
     }
@@ -1327,7 +1327,7 @@ export class SentryApiService {
                 host: new URL(region.url).host,
               }),
               query: { query: params?.query, per_page: 25 },
-            } as Parameters<typeof sdkListYourOrganizations>[0]);
+            });
             return this.unwrapSdkResult(
               regionResult,
               "listOrganizations(region)",
@@ -1348,7 +1348,7 @@ export class SentryApiService {
         const result = await sdkListYourOrganizations({
           ...this.getSdkConfig(opts),
           query: { query: params?.query, per_page: 25 },
-        } as Parameters<typeof sdkListYourOrganizations>[0]);
+        });
         const data = this.unwrapSdkResult(result, "listOrganizations");
         return OrganizationListSchema.parse(data);
       }
@@ -2164,7 +2164,7 @@ export class SentryApiService {
       ...this.getSdkConfig(opts),
       path: {
         organization_id_or_slug: organizationSlug,
-        issue_id: issueId as unknown as number,
+        issue_id: issueId,
       },
     });
     const data = this.unwrapSdkResult(result, "getIssue");
@@ -2212,7 +2212,7 @@ export class SentryApiService {
       ...this.getSdkConfig(opts),
       path: {
         organization_id_or_slug: organizationSlug,
-        issue_id: issueId as unknown as number,
+        issue_id: issueId,
         key: tagKey,
       },
     });
@@ -2246,7 +2246,7 @@ export class SentryApiService {
       ...this.getSdkConfig(opts),
       path: {
         organization_id_or_slug: organizationSlug,
-        issue_id: issueId as unknown as number,
+        issue_id: issueId,
       },
     });
     const data = this.unwrapSdkResult(result, "getIssueExternalLinks");
@@ -2269,7 +2269,7 @@ export class SentryApiService {
       ...this.getSdkConfig(opts),
       path: {
         organization_id_or_slug: organizationSlug,
-        issue_id: issueId as unknown as number,
+        issue_id: issueId,
         event_id: eventId as "latest" | "oldest" | "recommended",
       },
     });
@@ -2413,10 +2413,10 @@ export class SentryApiService {
       ...this.getSdkConfig(opts),
       path: {
         organization_id_or_slug: organizationSlug,
-        issue_id: issueId as unknown as number,
+        issue_id: issueId,
       },
       query: sdkQuery,
-    } as Parameters<typeof sdkListAnIssueSEvents>[0]);
+    });
     return this.unwrapSdkResult(result, "listEventsForIssue");
   }
 
@@ -2538,19 +2538,18 @@ export class SentryApiService {
     opts?: RequestOptions,
   ): Promise<string[]> {
     const normalizedIssueId = String(issueId);
-    // The SDK type doesn't include returnIds, data_source, or project params,
-    // so we pass extra query params via cast.
+    // `project` is not in the spec for this endpoint, so a cast is still required.
     const result = await sdkRetrieveACountOfReplays({
       ...this.getSdkConfig(opts),
       path: { organization_id_or_slug: organizationSlug },
       query: {
         query: `issue.id:[${normalizedIssueId}]`,
         statsPeriod: "90d",
-        returnIds: "true",
+        returnIds: true,
         data_source: dataSource,
         project: "-1",
       },
-    } as Parameters<typeof sdkRetrieveACountOfReplays>[0]);
+    } as unknown as Parameters<typeof sdkRetrieveACountOfReplays>[0]);
     const data = this.unwrapSdkResult(result, "listReplayIdsForIssue");
 
     const replayIdsByResource = ReplayIdsByResourceSchema.parse(data);
@@ -2630,7 +2629,7 @@ export class SentryApiService {
       ...this.getSdkConfig(opts),
       path: {
         organization_id_or_slug: organizationSlug,
-        issue_id: issueId as unknown as number,
+        issue_id: issueId,
       },
       body: updateData as Parameters<typeof sdkUpdateAnIssue>[0]["body"],
     });
@@ -2753,7 +2752,7 @@ export class SentryApiService {
       sentryQuery.push(`project:${projectSlug}`);
     }
 
-    // The SDK type doesn't include allowAggregateConditions or useRpc params
+    // `useRpc` is not in the spec, so a cast is still required.
     const result = await sdkQueryExploreEvents({
       ...this.getSdkConfig(opts),
       path: { organization_id_or_slug: organizationSlug },
@@ -2772,10 +2771,10 @@ export class SentryApiService {
           "timestamp",
         ],
         query: sentryQuery.join(" "),
-        allowAggregateConditions: "0",
+        allowAggregateConditions: false,
         useRpc: "1",
       },
-    } as Parameters<typeof sdkQueryExploreEvents>[0]);
+    } as unknown as Parameters<typeof sdkQueryExploreEvents>[0]);
     const data = this.unwrapSdkResult(result, "searchSpans");
     return SpansSearchResponseSchema.parse(data).data;
   }
@@ -3026,7 +3025,7 @@ export class SentryApiService {
       ...this.getSdkConfig(opts),
       path: {
         organization_id_or_slug: organizationSlug,
-        issue_id: issueId as unknown as number,
+        issue_id: issueId,
       },
       body: {
         event_id: eventId,
@@ -3052,7 +3051,7 @@ export class SentryApiService {
       ...this.getSdkConfig(opts),
       path: {
         organization_id_or_slug: organizationSlug,
-        issue_id: issueId as unknown as number,
+        issue_id: issueId,
       },
     });
     const data = this.unwrapSdkResult(result, "getAutofixState");
