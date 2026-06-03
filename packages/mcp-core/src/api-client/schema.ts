@@ -40,6 +40,7 @@ import {
   zAutofixPostResponse,
   zGroupExternalIssueResponse,
   zOrganizationEventsResponseDict,
+  zTagKeyDetailsDict,
 } from "@sentry/api/zod";
 
 /**
@@ -339,13 +340,8 @@ export const ReleaseListSchema = z.array(ReleaseSchema);
  * - `src/sentry/tagstore/types.py` (`TagKeySerializerResponse`)
  * - `src/sentry/api/endpoints/organization_tags.py`
  */
-export const TagSchema = z
-  .object({
-    key: z.string(),
-    name: z.string(),
-    totalValues: z.number().nullable().optional(),
-    uniqueValues: z.number().nullable().optional(),
-  })
+export const TagSchema = zTagKeyDetailsDict
+  .pick({ key: true, name: true, totalValues: true, uniqueValues: true })
   .transform((tag) => ({
     key: tag.key,
     name: tag.name,
