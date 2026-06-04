@@ -2544,7 +2544,6 @@ export class SentryApiService {
     opts?: RequestOptions,
   ): Promise<string[]> {
     const normalizedIssueId = String(issueId);
-    // `project` is not in the spec for this endpoint, so a cast is still required.
     const result = await sdkRetrieveACountOfReplays({
       ...this.getSdkConfig(opts),
       path: { organization_id_or_slug: organizationSlug },
@@ -2553,9 +2552,8 @@ export class SentryApiService {
         statsPeriod: "90d",
         returnIds: true,
         data_source: dataSource,
-        project: "-1",
       },
-    } as unknown as Parameters<typeof sdkRetrieveACountOfReplays>[0]);
+    });
     const data = this.unwrapSdkResult(result, "listReplayIdsForIssue");
 
     const replayIdsByResource = ReplayIdsByResourceSchema.parse(data);
@@ -2758,7 +2756,6 @@ export class SentryApiService {
       sentryQuery.push(`project:${projectSlug}`);
     }
 
-    // `useRpc` is not in the spec, so a cast is still required.
     const result = await sdkQueryExploreEvents({
       ...this.getSdkConfig(opts),
       path: { organization_id_or_slug: organizationSlug },
@@ -2777,10 +2774,9 @@ export class SentryApiService {
           "timestamp",
         ],
         query: sentryQuery.join(" "),
-        allowAggregateConditions: "0",
-        useRpc: "1",
+        allowAggregateConditions: false,
       },
-    } as unknown as Parameters<typeof sdkQueryExploreEvents>[0]);
+    });
     const data = this.unwrapSdkResult(result, "searchSpans");
     return SpansSearchResponseSchema.parse(data).data;
   }
